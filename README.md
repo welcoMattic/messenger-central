@@ -7,7 +7,7 @@ back once fixed.
 
 Built on top of the [Symfony TUI component](https://symfony.com/doc/current/tui.html).
 
-If it saves you time, [sponsor my open source work](https://github.com/sponsors/welcoMattic).
+If it saves you time, you can [sponsor my open source work](https://github.com/sponsors/welcoMattic).
 
 ```
  Messenger Central  ·  9 transports  ·  8 workers running

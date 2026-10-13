@@ -27,6 +27,7 @@ use Welcomattic\MessengerCentral\Transport\TransportCatalog;
 use Welcomattic\MessengerCentral\Tui\Dashboard;
 use Welcomattic\MessengerCentral\Worker\WorkerSupervisor;
 
+use function array_slice;
 use function microtime;
 use function usleep;
 
@@ -584,6 +585,19 @@ final class DashboardTest extends TestCase
 
         // Then
         static::assertStringContainsString('page 1 of 2', $screen);
+
+        // When: the messages of the second page go away
+        $this->dashboard->input(']');
+        $this->tick();
+        $failed->envelopes = array_slice($failed->envelopes, 0, 3, true);
+        $this->dashboard->input("\e[A");
+        $this->dashboard->input("\e[B");
+        $this->tick();
+        $screen = $this->tick();
+
+        // Then
+        static::assertStringContainsString('Failed messages  3', $screen);
+        static::assertStringContainsString('├ #1 RoutedByClass', $screen);
     }
 
     public function testItShowsTheErrorsOfAFailedMessage(): void

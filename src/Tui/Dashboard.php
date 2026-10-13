@@ -398,6 +398,13 @@ final class Dashboard
     private function received(string $transport, QueueSnapshot $snapshot, float $now): void
     {
         $this->queues[$transport] = $snapshot;
+
+        // Back to the last page when messages went away
+        $page = $this->failedPage($transport);
+        if ($page > 0 && null !== $snapshot->count) {
+            $this->failedPages[$transport] = min($page, max(0, intdiv($snapshot->count - 1, self::FAILED_LIST_LIMIT)));
+        }
+
         if (null === $snapshot->error) {
             unset($this->queueFailures[$transport], $this->queueRetryAt[$transport]);
 
