@@ -21,6 +21,7 @@ use Welcomattic\MessengerCentral\Failure\FailedMessages;
 use Welcomattic\MessengerCentral\Tests\Failure\ListableTransport;
 use Welcomattic\MessengerCentral\Tests\Fixtures\Message\RoutedByClass;
 use Welcomattic\MessengerCentral\Tests\Worker\FakeProcessFactory;
+use Welcomattic\MessengerCentral\Transport\InProcessQueueProbe;
 use Welcomattic\MessengerCentral\Transport\QueueInspector;
 use Welcomattic\MessengerCentral\Transport\TransportCatalog;
 use Welcomattic\MessengerCentral\Tui\Dashboard;
@@ -72,9 +73,11 @@ final class DashboardTest extends TestCase
                 'name:with:colons' => ['dsn' => 'in-memory://'],
             ]),
             $this->supervisor,
-            $inspector ?? new QueueInspector(new ServiceLocator([
-                'async' => static fn(): FakeReceiver => new FakeReceiver(),
-            ])),
+            new InProcessQueueProbe(
+                $inspector ?? new QueueInspector(new ServiceLocator([
+                    'async' => static fn(): FakeReceiver => new FakeReceiver(),
+                ])),
+            ),
             $failedMessages ?? new FailedMessages(new ServiceLocator([])),
             $this->terminal,
             $clock,

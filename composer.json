@@ -29,6 +29,7 @@
         "symfony/http-kernel": "^8.1",
         "symfony/messenger": "^8.1",
         "symfony/process": "^8.1",
+        "symfony/service-contracts": "^3.6",
         "symfony/tui": "8.1.*|8.2.*"
     },
     "suggest": {

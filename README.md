@@ -145,9 +145,12 @@ does not start (a worker started by hand, a web request...):
 MESSENGER_CONSUMER_NAME=consumer
 ```
 
-Waiting messages are counted by the dashboard itself, for transports that
-implement `MessageCountAwareInterface` (Doctrine, Redis, AMQP, SQS, Beanstalkd),
-and listed for those implementing `ListableReceiverInterface` (Doctrine).
+Waiting messages are counted for transports that implement
+`MessageCountAwareInterface` (Doctrine, Redis, AMQP, SQS, Beanstalkd), and
+listed for those implementing `ListableReceiverInterface` (Doctrine). A probe
+process started by the dashboard, the hidden `messenger:central:probe` command,
+inspects them: a broker that does not answer never freezes the dashboard, and
+services are reset after each inspection, as `messenger:consume` does.
 
 Workers that stop by themselves, because of `--time-limit`, `--memory-limit`,
 `--limit` or `messenger:stop-workers`, are started again at once while their

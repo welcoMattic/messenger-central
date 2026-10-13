@@ -36,6 +36,8 @@ final class CollectTransportsPass implements CompilerPassInterface
     private const array SERVICE_IDS = [
         self::CATALOG_ID,
         'messenger_central.queue_inspector',
+        'messenger_central.queue_probe',
+        'messenger_central.probe_command',
         'messenger_central.failed_messages',
         'messenger_central.process_factory',
         'messenger_central.worker_supervisor',

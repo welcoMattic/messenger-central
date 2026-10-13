@@ -14,6 +14,11 @@ final class FakeProcessFactory implements ProcessFactory
     /** @var list<array{string, int, int}> transport, worker id and concurrency of each worker */
     public array $created = [];
 
+    public int $probes = 0;
+
+    /** @var string see tests/Fixtures/fake-probe.php */
+    public string $probeMode = 'default';
+
     /**
      * @param string $mode see tests/Fixtures/fake-worker.php
      */
@@ -34,5 +39,12 @@ final class FakeProcessFactory implements ProcessFactory
             (string) $this->messages,
             $this->mode,
         ]);
+    }
+
+    public function createProbe(): Process
+    {
+        ++$this->probes;
+
+        return new Process([PHP_BINARY, __DIR__ . '/../Fixtures/fake-probe.php', $this->probeMode]);
     }
 }

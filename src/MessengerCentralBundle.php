@@ -10,8 +10,10 @@ use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Loader\Configurator\ContainerConfigurator;
 use Symfony\Component\HttpKernel\Bundle\AbstractBundle;
 use Welcomattic\MessengerCentral\Command\CentralCommand;
+use Welcomattic\MessengerCentral\Command\ProbeCommand;
 use Welcomattic\MessengerCentral\DependencyInjection\CollectTransportsPass;
 use Welcomattic\MessengerCentral\Failure\FailedMessages;
+use Welcomattic\MessengerCentral\Transport\ProcessQueueProbe;
 use Welcomattic\MessengerCentral\Transport\QueueInspector;
 use Welcomattic\MessengerCentral\Transport\TransportCatalog;
 use Welcomattic\MessengerCentral\Worker\ConsumeProcessFactory;
@@ -76,6 +78,10 @@ final class MessengerCentralBundle extends AbstractBundle
             'messenger.receiver_locator',
         )]);
 
+        $services->set('messenger_central.queue_probe', ProcessQueueProbe::class)->args([service(
+            'messenger_central.process_factory',
+        )]);
+
         $services->set('messenger_central.failed_messages', FailedMessages::class)->args([service(
             'messenger.receiver_locator',
         )]);
@@ -101,11 +107,16 @@ final class MessengerCentralBundle extends AbstractBundle
             ->args([
                 service(CollectTransportsPass::CATALOG_ID),
                 service('messenger_central.worker_supervisor'),
-                service('messenger_central.queue_inspector'),
+                service('messenger_central.queue_probe'),
                 service('messenger_central.failed_messages'),
                 $config['concurrency'],
                 param('kernel.debug'),
             ])
+            ->tag('console.command');
+
+        $services
+            ->set('messenger_central.probe_command', ProbeCommand::class)
+            ->args([service('messenger_central.queue_inspector'), service('services_resetter')->nullOnInvalid()])
             ->tag('console.command');
     }
 

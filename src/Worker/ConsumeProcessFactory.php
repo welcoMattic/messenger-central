@@ -6,6 +6,7 @@ namespace Welcomattic\MessengerCentral\Worker;
 
 use Symfony\Component\Process\PhpExecutableFinder;
 use Symfony\Component\Process\Process;
+use Welcomattic\MessengerCentral\Command\ProbeCommand;
 
 use function getmypid;
 use function sprintf;
@@ -13,7 +14,7 @@ use function sprintf;
 use const PHP_BINARY;
 
 /**
- * Starts "messenger:consume" through the application console.
+ * Starts "messenger:consume", and the queue probe, through the application console.
  */
 final readonly class ConsumeProcessFactory implements ProcessFactory
 {
@@ -29,11 +30,10 @@ final readonly class ConsumeProcessFactory implements ProcessFactory
 
     public function create(string $transport, int $workerId, int $concurrency = 1): Process
     {
-        $php = $this->phpBinary ?? new PhpExecutableFinder()->find(false);
         $dashboard = getmypid();
 
         $process = new Process([
-            false === $php ? PHP_BINARY : $php,
+            $this->php(),
             $this->consolePath,
             'messenger:consume',
             $transport,
@@ -54,5 +54,22 @@ final readonly class ConsumeProcessFactory implements ProcessFactory
         $process->setTimeout(null);
 
         return $process;
+    }
+
+    public function createProbe(): Process
+    {
+        $process = new Process([$this->php(), $this->consolePath, ProbeCommand::NAME, '--no-interaction'], env: [
+            'APP_ENV' => $this->environment,
+        ]);
+        $process->setTimeout(null);
+
+        return $process;
+    }
+
+    private function php(): string
+    {
+        $php = $this->phpBinary ?? new PhpExecutableFinder()->find(false);
+
+        return false === $php ? PHP_BINARY : $php;
     }
 }

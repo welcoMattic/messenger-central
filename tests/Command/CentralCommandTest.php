@@ -11,6 +11,7 @@ use Symfony\Component\DependencyInjection\ServiceLocator;
 use Welcomattic\MessengerCentral\Command\CentralCommand;
 use Welcomattic\MessengerCentral\Failure\FailedMessages;
 use Welcomattic\MessengerCentral\Tests\Worker\FakeProcessFactory;
+use Welcomattic\MessengerCentral\Transport\InProcessQueueProbe;
 use Welcomattic\MessengerCentral\Transport\QueueInspector;
 use Welcomattic\MessengerCentral\Transport\TransportCatalog;
 use Welcomattic\MessengerCentral\Worker\WorkerSupervisor;
@@ -49,7 +50,7 @@ final class CentralCommandTest extends TestCase
             new CentralCommand(
                 new TransportCatalog(['async' => []]),
                 new WorkerSupervisor(new FakeProcessFactory()),
-                new QueueInspector(new ServiceLocator([])),
+                new InProcessQueueProbe(new QueueInspector(new ServiceLocator([]))),
                 new FailedMessages(new ServiceLocator([])),
                 debug: $debug,
             ),

@@ -24,7 +24,7 @@ use Throwable;
 use Welcomattic\MessengerCentral\Failure\FailedMessage;
 use Welcomattic\MessengerCentral\Failure\FailedMessageException;
 use Welcomattic\MessengerCentral\Failure\FailedMessages;
-use Welcomattic\MessengerCentral\Transport\QueueInspector;
+use Welcomattic\MessengerCentral\Transport\QueueProbe;
 use Welcomattic\MessengerCentral\Transport\QueueSnapshot;
 use Welcomattic\MessengerCentral\Transport\TransportCatalog;
 use Welcomattic\MessengerCentral\Transport\TransportDefinition;
@@ -137,7 +137,7 @@ final class Dashboard
     public function __construct(
         private readonly TransportCatalog $catalog,
         private readonly WorkerSupervisor $supervisor,
-        private readonly QueueInspector $inspector,
+        private readonly QueueProbe $probe,
         private readonly FailedMessages $failedMessages,
         TerminalInterface $terminal,
         private readonly ClockInterface $clock = new NativeClock(),
@@ -281,7 +281,7 @@ final class Dashboard
             $limit = $this->catalog->get($this->selected)->failureTransport
                 ? self::FAILED_LIST_LIMIT
                 : self::QUEUE_PEEK_LIMIT;
-            $changed = $this->inspect($this->selected, $limit, $now) || $changed;
+            $this->inspect($this->selected, $limit, $now);
         }
 
         if (($now - $this->otherQueuesAt) >= self::OTHER_QUEUES_INTERVAL) {
@@ -295,8 +295,13 @@ final class Dashboard
                 $limit = $transport->failureTransport && $this->expanded === $transport->name
                     ? self::FAILED_LIST_LIMIT
                     : 0;
-                $changed = $this->inspect($transport->name, $limit, $now) || $changed;
+                $this->inspect($transport->name, $limit, $now);
             }
+        }
+
+        foreach ($this->probe->poll() as $answer) {
+            $this->received($answer['transport'], $answer['snapshot'], $now);
+            $changed = true;
         }
 
         if ($changed || $this->supervisor->hasRunning()) {
@@ -330,30 +335,27 @@ final class Dashboard
     }
 
     /**
-     * Inspects the queue of a transport, less and less often while it fails:
-     * an unreachable broker can block until its connection timeout.
-     *
-     * @return bool whether the queue was inspected
+     * Asks for the queue of a transport, less and less often while it fails.
      */
-    private function inspect(string $transport, int $limit, float $now): bool
+    private function inspect(string $transport, int $limit, float $now): void
     {
-        if ($now < ($this->queueRetryAt[$transport] ?? 0.0)) {
-            return false;
+        if ($now >= ($this->queueRetryAt[$transport] ?? 0.0) && !$this->probe->pending($transport)) {
+            $this->probe->request($transport, $limit);
         }
+    }
 
-        $snapshot = $this->inspector->inspect($transport, $limit);
+    private function received(string $transport, QueueSnapshot $snapshot, float $now): void
+    {
         $this->queues[$transport] = $snapshot;
         if (null === $snapshot->error) {
             unset($this->queueFailures[$transport], $this->queueRetryAt[$transport]);
 
-            return true;
+            return;
         }
 
         $failures = ($this->queueFailures[$transport] ?? 0) + 1;
         $this->queueFailures[$transport] = $failures;
         $this->queueRetryAt[$transport] = $now + min(self::MAX_QUEUE_BACKOFF, 2 ** $failures);
-
-        return true;
     }
 
     private function onInput(InputEvent $event): void

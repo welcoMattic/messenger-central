@@ -162,6 +162,19 @@ final class BundleTest extends TestCase
         static::assertStringContainsString('needs an interactive terminal', $tester->getDisplay());
     }
 
+    public function testItRegistersTheQueueProbe(): void
+    {
+        // Given
+        $application = new Application($this->boot(self::MESSENGER));
+        $application->setAutoExit(false);
+
+        // When
+        $probe = $application->find('messenger:central:probe');
+
+        // Then
+        static::assertTrue($probe->isHidden());
+    }
+
     public function testItStaysOutOfTheWayWithoutMessenger(): void
     {
         // Given
@@ -174,6 +187,7 @@ final class BundleTest extends TestCase
         static::assertInstanceOf(ContainerInterface::class, $container);
         static::assertFalse($container->has(CollectTransportsPass::CATALOG_ID));
         static::assertFalse(new Application($kernel)->has('messenger:central'));
+        static::assertFalse(new Application($kernel)->has('messenger:central:probe'));
     }
 
     /**
