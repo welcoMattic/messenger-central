@@ -1,0 +1,58 @@
+{
+    "name": "welcomattic/messenger-central",
+    "description": "A terminal UI to drive Symfony Messenger workers during development",
+    "type": "symfony-bundle",
+    "license": "MIT",
+    "keywords": ["symfony", "messenger", "worker", "tui", "terminal", "dev"],
+    "authors": [
+        {
+            "name": "Mathieu Santostefano",
+            "email": "msantostefano@proton.me"
+        }
+    ],
+    "require": {
+        "php": ">=8.4.1",
+        "symfony/config": "^8.1",
+        "symfony/console": "^8.1",
+        "symfony/dependency-injection": "^8.1",
+        "symfony/event-dispatcher": "^8.1",
+        "symfony/http-kernel": "^8.1",
+        "symfony/messenger": "^8.1",
+        "symfony/process": "^8.1",
+        "symfony/tui": "^8.1"
+    },
+    "require-dev": {
+        "carthage-software/mago": "^1.56",
+        "phpunit/phpunit": "^12.4",
+        "symfony/framework-bundle": "^8.1"
+    },
+    "autoload": {
+        "psr-4": {
+            "Welcomattic\\MessengerCentral\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Welcomattic\\MessengerCentral\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "carthage-software/mago": true
+        }
+    },
+    "scripts": {
+        "test": "phpunit",
+        "lint": "mago lint",
+        "analyze": "mago analyze",
+        "fmt": "mago fmt",
+        "fmt-check": "mago fmt --dry-run",
+        "qa": [
+            "@fmt-check",
+            "@lint",
+            "@analyze",
+            "@test"
+        ]
+    }
+}

@@ -1,0 +1,30 @@
+php-version = "8.4.1"
+
+[source]
+paths = ["src", "tests"]
+includes = ["vendor"]
+
+[formatter]
+print-width = 120
+
+[linter]
+integrations = ["symfony", "phpunit"]
+
+[linter.rules]
+# Positional literals read fine in this code base (sprintf, str_repeat, Style...)
+literal-named-argument = { enabled = false }
+# isset() on array keys is the idiomatic check in Symfony code
+no-isset = { enabled = false }
+# Interfaces of symfony/tui take boolean flags (expandVertically(), setFocused())
+no-boolean-flag-parameter = { enabled = false }
+# Size metrics: the dashboard and the menu widget are cohesive on purpose
+cyclomatic-complexity = { enabled = false }
+kan-defect = { enabled = false }
+halstead = { enabled = false }
+too-many-methods = { enabled = false }
+too-many-properties = { enabled = false }
+excessive-parameter-list = { enabled = false }
+
+[analyzer]
+# Messenger reports and container arguments are untyped data, narrowed with is_*() checks
+ignore = ["mixed-assignment"]
