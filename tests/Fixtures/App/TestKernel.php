@@ -68,6 +68,7 @@ final class TestKernel extends Kernel
             $container->loadFromExtension('messenger_central', $this->centralConfig);
 
             $container->register(TestHandler::class)->setAutoconfigured(true)->setPublic(false);
+            $container->register(FileTransportFactory::class)->addTag('messenger.transport_factory');
             $container->register('test.retry_strategy', MultiplierRetryStrategy::class);
             // A transport that is not built from a DSN
             $container->register('test.custom_transport', InMemoryTransport::class)->addTag('messenger.receiver', [

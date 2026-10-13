@@ -1,0 +1,28 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/*
+ * The console of the test application, for the tests that start real
+ * workers on a "files" transport, whose directory is given by the
+ * MESSENGER_CENTRAL_TEST_DIR environment variable.
+ */
+
+use Symfony\Bundle\FrameworkBundle\Console\Application;
+use Welcomattic\MessengerCentral\Tests\Fixtures\App\TestKernel;
+use Welcomattic\MessengerCentral\Tests\Fixtures\Message\RoutedByClass;
+
+require dirname(__DIR__, 4) . '/vendor/autoload.php';
+
+$application = new Application(new TestKernel([
+    'transports' => ['files' => 'test-file://' . getenv('MESSENGER_CENTRAL_TEST_DIR')],
+    'routing' => [RoutedByClass::class => 'files'],
+]));
+
+// Symfony 8.2 requires this file to get the application, to handle messages in child processes
+if (realpath((string) ($_SERVER['SCRIPT_FILENAME'] ?? '')) !== __FILE__) {
+    return $application;
+}
+
+$application->run();
