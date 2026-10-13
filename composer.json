@@ -47,7 +47,8 @@
     },
     "autoload-dev": {
         "psr-4": {
-            "Welcomattic\\MessengerCentral\\Tests\\": "tests/"
+            "Welcomattic\\MessengerCentral\\Tests\\": "tests/",
+            "Welcomattic\\MessengerCentral\\Tools\\Mago\\": "tools/mago/"
         }
     },
     "config": {

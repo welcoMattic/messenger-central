@@ -1,7 +1,7 @@
 php-version = "8.4.1"
 
 [source]
-paths = ["src", "tests"]
+paths = ["src", "tests", "tools"]
 includes = ["vendor"]
 
 [formatter]
@@ -28,3 +28,7 @@ excessive-parameter-list = { enabled = false }
 [analyzer]
 # Messenger reports and container arguments are untyped data, narrowed with is_*() checks
 ignore = ["mixed-assignment"]
+
+# Project rules, in tools/mago
+[extension-hosts.messenger-central]
+command = ["php", "tools/mago/worker.php"]

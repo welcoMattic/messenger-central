@@ -232,6 +232,11 @@ composer install
 composer qa   # mago fmt --dry-run, mago lint, mago analyze, phpunit
 ```
 
+Configuration trees are indented by nesting level, which the formatter would
+flatten: a project rule of `mago lint` (in `tools/mago`) checks it, and
+`mago lint --fix` fixes it. The builder methods that open a level are read from
+the installed Symfony Config component, so new node types need no change.
+
 ## Sponsors
 
 Messenger Central is free and open source. Sponsoring funds my open source
