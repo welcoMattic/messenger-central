@@ -78,7 +78,9 @@ If it saves you time, [sponsor my open source work](https://github.com/sponsors/
 composer require --dev welcomattic/messenger-central
 ```
 
-Enable the bundle in the `dev` environment only, in `config/bundles.php`:
+With Symfony Flex, the bundle is enabled by itself in the `dev` and `test`
+environments. To enable it in `dev` only, or without Flex, set it in
+`config/bundles.php`:
 
 ```php
 return [
@@ -86,6 +88,9 @@ return [
     Welcomattic\MessengerCentral\MessengerCentralBundle::class => ['dev' => true],
 ];
 ```
+
+The command refuses to run when the kernel runs without debug, like in
+production; `--force` runs it anyway.
 
 ## Usage
 
@@ -117,7 +122,8 @@ the worker events: it writes one JSON line per event (message received,
 handled, failed, heartbeat...) on the standard output, read by the dashboard.
 Outside the dashboard, the listener does nothing.
 
-Workers also get a unique `MESSENGER_CONSUMER_NAME` environment variable. Use it
+Workers also get a unique `MESSENGER_CONSUMER_NAME` environment variable, made
+of the id of the dashboard process and of the worker. Use it
 as the consumer name of Redis transports, as the
 [Symfony documentation](https://symfony.com/doc/current/messenger.html#redis-transport)
 recommends, so that scaled workers do not share their pending messages:

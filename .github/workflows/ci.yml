@@ -41,13 +41,18 @@ jobs:
         run: vendor/bin/mago analyze --reporting-format=github
 
   tests:
-    name: Tests (PHP ${{ matrix.php }}, ${{ matrix.dependencies }} dependencies)
-    runs-on: ubuntu-latest
+    name: Tests (PHP ${{ matrix.php }}, ${{ matrix.dependencies }} dependencies, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         php: ['8.4', '8.5']
         dependencies: [lowest, highest]
+        include:
+          - os: macos-latest
+            php: '8.4'
+            dependencies: highest
     steps:
       - uses: actions/checkout@v7
 
@@ -67,8 +72,7 @@ jobs:
   symfony-next:
     name: Tests (Symfony 8.2, in development)
     runs-on: ubuntu-latest
-    # Symfony 8.2 is not released yet: its changes must not block the build
-    continue-on-error: true
+    # Symfony 8.2 is not released yet, but composer.json allows its experimental TUI component
     env:
       SYMFONY_REQUIRE: '8.2.*'
     steps:
@@ -81,10 +85,11 @@ jobs:
           coverage: none
           tools: composer:v2, flex
 
-      - name: Allow development versions
+      - name: Allow development versions, and handle messages in parallel
         run: |
           composer config minimum-stability dev
           composer config prefer-stable true
+          composer require --dev --no-update amphp/parallel
 
       - name: Install dependencies
         run: composer update --no-interaction --no-progress

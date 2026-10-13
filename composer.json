@@ -29,7 +29,7 @@
         "symfony/http-kernel": "^8.1",
         "symfony/messenger": "^8.1",
         "symfony/process": "^8.1",
-        "symfony/tui": "^8.1"
+        "symfony/tui": "8.1.*|8.2.*"
     },
     "suggest": {
         "ext-pcntl": "To let workers finish their current messages when they are stopped",

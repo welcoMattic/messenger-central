@@ -1,0 +1,9 @@
+# Left out of the archives that Composer installs
+/.github export-ignore
+/.gitattributes export-ignore
+/.gitignore export-ignore
+/mago.toml export-ignore
+/phpunit.xml.dist export-ignore
+/SPONSORS.md export-ignore
+/tests export-ignore
+/tools export-ignore

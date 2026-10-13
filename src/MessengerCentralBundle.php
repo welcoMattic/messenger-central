@@ -104,6 +104,7 @@ final class MessengerCentralBundle extends AbstractBundle
                 service('messenger_central.queue_inspector'),
                 service('messenger_central.failed_messages'),
                 $config['concurrency'],
+                param('kernel.debug'),
             ])
             ->tag('console.command');
     }

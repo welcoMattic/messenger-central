@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Welcomattic\MessengerCentral\Command;
 
 use Symfony\Component\Console\Attribute\AsCommand;
+use Symfony\Component\Console\Attribute\Option;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Style\SymfonyStyle;
 use Symfony\Component\Tui\Terminal\Terminal;
@@ -16,6 +17,7 @@ use Welcomattic\MessengerCentral\Worker\WorkerSupervisor;
 
 use function stream_isatty;
 
+use const PHP_OS_FAMILY;
 use const STDIN;
 use const STDOUT;
 
@@ -28,10 +30,29 @@ final readonly class CentralCommand
         private QueueInspector $inspector,
         private FailedMessages $failedMessages,
         private int $concurrency = 1,
+        private bool $debug = true,
     ) {}
 
-    public function __invoke(SymfonyStyle $io): int
-    {
+    public function __invoke(
+        SymfonyStyle $io,
+        #[Option('Run even when the kernel runs without debug, like in production')]
+        bool $force = false,
+    ): int {
+        if (!$this->debug && !$force) {
+            $io->error([
+                'Messenger Central is a development tool, and the kernel runs without debug, like in production.',
+                'Run it in the dev environment, or use --force to run it anyway.',
+            ]);
+
+            return Command::FAILURE;
+        }
+
+        if ('Windows' === PHP_OS_FAMILY) {
+            $io->error('Messenger Central needs a POSIX terminal: run it on Linux, macOS or WSL.');
+
+            return Command::FAILURE;
+        }
+
         if (!stream_isatty(STDIN) || !stream_isatty(STDOUT)) {
             $io->error('Messenger Central needs an interactive terminal.');
 

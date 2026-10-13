@@ -7,6 +7,9 @@ namespace Welcomattic\MessengerCentral\Worker;
 use Symfony\Component\Process\PhpExecutableFinder;
 use Symfony\Component\Process\Process;
 
+use function getmypid;
+use function sprintf;
+
 use const PHP_BINARY;
 
 /**
@@ -27,6 +30,7 @@ final readonly class ConsumeProcessFactory implements ProcessFactory
     public function create(string $transport, int $workerId, int $concurrency = 1): Process
     {
         $php = $this->phpBinary ?? new PhpExecutableFinder()->find(false);
+        $dashboard = getmypid();
 
         $process = new Process([
             false === $php ? PHP_BINARY : $php,
@@ -38,8 +42,13 @@ final readonly class ConsumeProcessFactory implements ProcessFactory
             ...$this->consumeOptions,
         ], env: [
             WorkerReporter::ENV_VAR => (string) $workerId,
-            // Gives every worker its own consumer name, as Symfony recommends for Redis
-            'MESSENGER_CONSUMER_NAME' => 'messenger-central-' . $workerId,
+            // Gives every worker its own consumer name, as Symfony recommends for Redis, which
+            // holds the id of the dashboard process: two dashboards may share a Redis server
+            'MESSENGER_CONSUMER_NAME' => sprintf(
+                'messenger-central-%d-%d',
+                false === $dashboard ? 0 : $dashboard,
+                $workerId,
+            ),
             'APP_ENV' => $this->environment,
         ]);
         $process->setTimeout(null);
