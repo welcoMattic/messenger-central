@@ -196,6 +196,41 @@ final class DashboardTest extends TestCase
         static::assertStringContainsString('"sync" cannot be consumed.', $screen);
     }
 
+    public function testItShowsWhatTheWorkersWrite(): void
+    {
+        // Given
+        $this->dashboard->input('s');
+        $this->waitFor('✓ 2 processed');
+
+        // When
+        $this->dashboard->input('l');
+        $screen = $this->waitFor('a log line');
+
+        // Then
+        static::assertStringContainsString('Output of the workers of async', $screen);
+        static::assertMatchesRegularExpression('/\d\d:\d\d:\d\d #1 +\[OK\] Consuming messages/', $screen);
+    }
+
+    public function testItShowsEveryKey(): void
+    {
+        // When
+        $this->dashboard->input('?');
+        $screen = $this->tick();
+
+        // Then
+        static::assertStringContainsString('Keys', $screen);
+        static::assertStringContainsString('Failed messages, on a failure transport', $screen);
+        static::assertStringContainsString('messages handled at the same time by each worker', $screen);
+
+        // When
+        $this->dashboard->input('?');
+        $screen = $this->tick();
+
+        // Then
+        static::assertStringNotContainsString('Failed messages, on a failure transport', $screen);
+        static::assertStringContainsString('async  ○ stopped', $screen);
+    }
+
     public function testItQuitsAtOnceWithoutWorkers(): void
     {
         // When

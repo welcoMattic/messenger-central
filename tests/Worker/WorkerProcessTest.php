@@ -59,7 +59,8 @@ final class WorkerProcessTest extends TestCase
         // Then
         static::assertNotNull($this->process);
         static::assertSame('', $this->process->getOutput(), 'Process keeps nothing in memory');
-        static::assertCount(50, $worker->output);
+        static::assertCount(200, $worker->output);
+        static::assertCount(200, $worker->outputAt);
     }
 
     public function testItTracksMessagesHandledAtTheSameTime(): void

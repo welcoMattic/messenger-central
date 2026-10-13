@@ -32,6 +32,8 @@ use Welcomattic\MessengerCentral\Transport\TransportDefinition;
 use Welcomattic\MessengerCentral\Tui\View\ActivityView;
 use Welcomattic\MessengerCentral\Tui\View\FailedMessagesView;
 use Welcomattic\MessengerCentral\Tui\View\FailedMessageView;
+use Welcomattic\MessengerCentral\Tui\View\HelpView;
+use Welcomattic\MessengerCentral\Tui\View\LogsView;
 use Welcomattic\MessengerCentral\Tui\View\MessagesView;
 use Welcomattic\MessengerCentral\Tui\View\OptionsView;
 use Welcomattic\MessengerCentral\Tui\Widget\CanvasWidget;
@@ -67,6 +69,7 @@ final class Dashboard
     public const string VIEW_ACTIVITY = 'activity';
     public const string VIEW_MESSAGES = 'messages';
     public const string VIEW_OPTIONS = 'options';
+    public const string VIEW_LOGS = 'logs';
 
     public const string PARALLEL_REQUIREMENTS = 'Symfony 8.2 and amphp/parallel';
 
@@ -147,6 +150,8 @@ final class Dashboard
     // Whether the selected failed message shows its errors instead of its properties
     private bool $showErrors = false;
 
+    private bool $help = false;
+
     /**
      * @param int       $concurrency default number of messages a worker handles at the same time
      * @param bool|null $parallel    whether "--concurrency" is supported, detected when null
@@ -184,6 +189,8 @@ final class Dashboard
             'next_page' => [']', Key::PAGE_DOWN],
             'previous_page' => ['[', Key::PAGE_UP],
             'errors' => ['e'],
+            'logs' => ['l'],
+            'help' => ['?'],
         ]);
         $this->promptKeybindings = new Keybindings([
             'submit' => [Key::ENTER],
@@ -460,6 +467,7 @@ final class Dashboard
         }
 
         $event->stopPropagation();
+        $this->help = 'help' === $action && !$this->help;
         if ('quit' === $action) {
             $this->requestQuit();
             $this->refresh();
@@ -487,6 +495,8 @@ final class Dashboard
             'next_page' => $this->changePage($transport, 1),
             'previous_page' => $this->changePage($transport, -1),
             'errors' => $this->toggleErrors(),
+            'logs' => $this->show($transport, self::VIEW_LOGS),
+            'help' => null,
             default => $this->collapse(),
         };
 
@@ -860,6 +870,7 @@ final class Dashboard
             'workers' => $this->toggleWorkers($transport),
             'concurrency' => $this->openPrompt($transport),
             self::VIEW_MESSAGES => $this->show($transport, self::VIEW_MESSAGES),
+            self::VIEW_LOGS => $this->show($transport, self::VIEW_LOGS),
             self::VIEW_OPTIONS => $this->show($transport, self::VIEW_OPTIONS),
             default => $this->toggleActions($transport),
         };
@@ -1150,6 +1161,8 @@ final class Dashboard
                         'label' => sprintf('  ├ Concurrency (%d)', $this->concurrency($name)),
                     ];
                 }
+
+                $rows[] = ['key' => 'action:' . self::VIEW_LOGS . ':' . $name, 'label' => '  ├ Output of the workers'];
             }
 
             $rows[] = ['key' => 'action:' . self::VIEW_OPTIONS . ':' . $name, 'label' => '  └ Options'];
@@ -1212,6 +1225,10 @@ final class Dashboard
             return [Format::dim('No Messenger transport is configured.')];
         }
 
+        if ($this->help) {
+            return HelpView::render($this->parallel);
+        }
+
         $selected = $this->selected;
         $transport = $this->catalog->get($selected);
 
@@ -1241,6 +1258,12 @@ final class Dashboard
 
         return match ($this->view($selected)) {
             self::VIEW_MESSAGES => MessagesView::render($transport),
+            self::VIEW_LOGS => LogsView::render(
+                $transport,
+                $this->supervisor->workers($selected),
+                $this->timezone,
+                $rows,
+            ),
             self::VIEW_OPTIONS => OptionsView::render($transport, $this->concurrency($selected), $this->parallel),
             default => ActivityView::render(
                 $transport,
@@ -1354,11 +1377,11 @@ final class Dashboard
 
         $lines[] = Format::dim(match (true) {
             null !== $this->selectedMessage
-                => ' ↑↓ move  ⏎ edit and send back  r send back as is  d remove  e errors  [ ] pages  q quit',
-            $failureTransport => ' ↑↓ move  ⏎ open  [ ] pages  R send all back  D remove all  o options  q quit',
+                => ' ↑↓ move  ⏎ edit and send back  r send back as is  d remove  e errors  [ ] pages  ? help  q quit',
+            $failureTransport => ' ↑↓ move  ⏎ open  [ ] pages  R send all back  D remove all  ? help  q quit',
             default => ' ↑↓ move  ⏎ open  s start/stop  +/- scale'
                 . ($this->parallel ? '  c concurrency' : '')
-                . '  a activity  m messages  o options  q quit',
+                . '  l output  o options  ? help  q quit',
         });
 
         return $lines;

@@ -32,7 +32,7 @@ If it saves you time, [sponsor my open source work](https://github.com/sponsors/
                              │  22:12:55 ✓  App\Message\SendEmail  5.9 ms  #3
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  emails  ✓ 2029 processed  ✗ 0 failed  ↻ 39 retried  158.4 msg/s  memory 48.0 MB, worker peak 16.0 MB  up 16s
- ↑↓ move  ⏎ open  s start/stop  +/- scale  a activity  m messages  o options  q quit
+ ↑↓ move  ⏎ open  s start/stop  +/- scale  l output  o options  ? help  q quit
 ```
 
 > [!WARNING]
@@ -61,6 +61,8 @@ If it saves you time, [sponsor my open source work](https://github.com/sponsors/
 - **Failed messages**: workers do not consume failure transports. Open one to
   list its messages, then edit a message and send it back to the transport it
   failed on.
+- **Output of the workers**: what they write, like logs and `dump()`, with the
+  time and the worker.
 - **Stats** in the footer: processed, failed and retried messages, throughput,
   memory used by the workers and their peak.
 
@@ -98,20 +100,29 @@ production; `--force` runs it anyway.
 bin/console messenger:central
 ```
 
-| Key              | Action                                                     |
-|------------------|------------------------------------------------------------|
-| `↑` `↓`          | Move in the sidebar                                        |
-| `⏎`              | Open a transport, or run the action under the cursor       |
-| `s`              | Start or stop the workers of the selected transport        |
-| `+` `-`          | Scale the workers up or down (before or after starting)    |
-| `c`              | Type the concurrency of the workers (Symfony 8.2)          |
-| `a`, `Esc`       | Live view                                                  |
-| `m`              | Message classes                                            |
-| `o`              | Options                                                    |
-| `q`, `Ctrl+C`    | Quit, stopping every worker                                |
-| `r`              | Send the failed message under the cursor back, as is       |
-| `Ctrl+S`         | Send the failed message being edited back to its transport |
-| `Esc`            | Leave the failed message being edited, without sending it  |
+| Key              | Action                                                                  |
+|------------------|-------------------------------------------------------------------------|
+| `↑` `↓`          | Move in the sidebar                                                     |
+| `⏎`              | Open a transport, or run the action under the cursor                    |
+| `←`              | Close the opened transport                                              |
+| `s`              | Start or stop the workers of the selected transport                     |
+| `+` `-`          | Scale the workers up or down (before or after starting)                 |
+| `c`              | Type the concurrency of the workers (Symfony 8.2)                       |
+| `a`, `Esc`       | Live view                                                               |
+| `l`              | Output of the workers: logs, dumps, errors                              |
+| `m`              | Message classes                                                         |
+| `o`              | Options                                                                 |
+| `?`              | Every key                                                               |
+| `q`, `Ctrl+C`    | Quit; asks first when workers run, `q` again kills them while they stop |
+
+| Key              | On a failure transport                                         |
+|------------------|----------------------------------------------------------------|
+| `[` `]`          | Turn the pages of failed messages                              |
+| `r`              | Send the failed message back as is                             |
+| `⏎`              | Edit the failed message, `Ctrl+S` sends it back, `Esc` cancels |
+| `d`              | Remove the failed message                                      |
+| `e`              | Show the errors of the failed message in full                  |
+| `R`, `D`         | Send every failed message back, remove them all                |
 
 ## How it works
 

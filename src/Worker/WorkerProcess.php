@@ -24,7 +24,7 @@ use function trim;
  */
 final class WorkerProcess
 {
-    private const int MAX_OUTPUT_LINES = 50;
+    private const int MAX_OUTPUT_LINES = 200;
 
     // POSIX values, so that ext-pcntl is not needed to send them
     private const int SIGTERM = 15;
@@ -49,8 +49,11 @@ final class WorkerProcess
     /** @var array{class: string, duration: float|null, at: float}|null the last message handled or failed */
     public ?array $last = null;
 
-    /** @var list<string> output lines that are not reports, most recent last */
+    /** @var list<string> output lines that are not reports, like logs and dumps, most recent last */
     public array $output = [];
+
+    /** @var list<float> when each output line was read */
+    public array $outputAt = [];
 
     private string $buffer = '';
     private string $errorBuffer = '';
@@ -121,7 +124,7 @@ final class WorkerProcess
         foreach ($this->lines($output, $this->buffer) as $line) {
             $report = WorkerReport::decode($line);
             if (null === $report) {
-                $this->appendOutput($line);
+                $this->appendOutput($line, $now);
 
                 continue;
             }
@@ -131,12 +134,12 @@ final class WorkerProcess
         }
 
         foreach ($this->lines($errorOutput, $this->errorBuffer) as $line) {
-            $this->appendOutput($line);
+            $this->appendOutput($line, $now);
         }
 
         if ($this->status->isAlive() && !$running) {
-            $this->appendOutput($this->buffer);
-            $this->appendOutput($this->errorBuffer);
+            $this->appendOutput($this->buffer, $now);
+            $this->appendOutput($this->errorBuffer, $now);
             $this->buffer = '';
             $this->errorBuffer = '';
             $this->status = WorkerStatus::Exited;
@@ -222,15 +225,17 @@ final class WorkerProcess
         return $lines;
     }
 
-    private function appendOutput(string $line): void
+    private function appendOutput(string $line, float $now): void
     {
         if ('' === trim($line)) {
             return;
         }
 
         $this->output[] = rtrim($line, "\r");
+        $this->outputAt[] = $now;
         if (count($this->output) > self::MAX_OUTPUT_LINES) {
             $this->output = array_slice($this->output, -self::MAX_OUTPUT_LINES);
+            $this->outputAt = array_slice($this->outputAt, -self::MAX_OUTPUT_LINES);
         }
     }
 
