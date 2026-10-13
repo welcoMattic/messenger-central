@@ -9,31 +9,7 @@ Built on top of the [Symfony TUI component](https://symfony.com/doc/current/tui.
 
 If it saves you time, you can [sponsor my open source work](https://github.com/sponsors/welcoMattic).
 
-```
- Messenger Central  ·  9 transports  ·  8 workers running
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-▸ emails ●3 (28)             │ emails  ● 3 workers running
-▸ reports (327)              │ doctrine://default?queue_name=emails
-▸ images ●2 (115)            │
-▸ urgent ●1 (15)             │ Incoming                                     ▂▄▅▆▅▃▃▅▅▅▁█▃▄  158.4 msg/s  2069 received
-▸ inventory ●2 (0)           │
-▸ notifications (476)        │ Workers
-▸ failed (26)                │  ⠇ #1   pid 570    16.0 MB  ✓ 623 ↻ 10  App\Message\SendEmail  8.4 ms
-▸ inventory_failed (0)       │  ⠇ #2   pid 571    16.0 MB  ✓ 808 ↻ 13  App\Message\SendEmail  3.2 ms
-▸ sync                       │  ⠇ #3   pid 572    16.0 MB  ✓ 598 ↻ 16  App\Message\SendEmail #10031  12.8 ms
-                             │
-                             │ Queue  28 waiting
-                             │   · App\Message\SendEmail #9780
-                             │   · App\Message\SendEmail #9912
-                             │
-                             │ Recent
-                             │  22:12:55 ✓  App\Message\SendEmail  5.0 ms  #3
-                             │  22:12:55 ✓  App\Message\SendEmail  10.7 ms  #3
-                             │  22:12:55 ✓  App\Message\SendEmail  5.9 ms  #3
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- emails  ✓ 2029 processed  ✗ 0 failed  ↻ 39 retried  158.4 msg/s  memory 48.0 MB, worker peak 16.0 MB  up 16s
- ↑↓ move  ⏎ open  s start/stop  +/- scale  l output  o options  ? help  q quit
-```
+![Messenger Central driving the Messenger workers of an application](docs/demo.webp)
 
 > [!WARNING]
 > This is a development tool, and the Symfony TUI component it relies on is
