@@ -149,6 +149,11 @@ Waiting messages are counted by the dashboard itself, for transports that
 implement `MessageCountAwareInterface` (Doctrine, Redis, AMQP, SQS, Beanstalkd),
 and listed for those implementing `ListableReceiverInterface` (Doctrine).
 
+Workers that stop by themselves, because of `--time-limit`, `--memory-limit`,
+`--limit` or `messenger:stop-workers`, are started again at once while their
+transport runs. A worker that crashes is started again after 1, 2, 4… up to 30
+seconds, so that one that cannot start does not loop.
+
 When you stop workers or quit, they get `SIGTERM` and finish their current
 messages; the ones still running after the stop timeout (10 seconds by default)
 are killed. If the dashboard itself is killed, its workers notice it and stop

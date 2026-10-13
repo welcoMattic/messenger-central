@@ -12,6 +12,7 @@ declare(strict_types=1);
  * - slow-boot: takes a second before handling signals, like a kernel booting
  * - stubborn: ignores SIGTERM
  * - crash: exits with an error, like the console does
+ * - limit: stops by itself after its messages, like with --limit or --time-limit
  */
 
 use Welcomattic\MessengerCentral\Worker\WorkerReport;
@@ -85,6 +86,12 @@ for ($i = 1; $i <= (int) $messages; ++$i) {
 }
 
 fwrite(STDERR, "a log line\n");
+
+if ('limit' === $mode) {
+    report($worker, WorkerReport::STOPPED);
+
+    exit(0);
+}
 
 $deadline = microtime(true) + 10;
 while (!$stop && microtime(true) < $deadline) {

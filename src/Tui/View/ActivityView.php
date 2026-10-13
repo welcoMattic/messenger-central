@@ -12,7 +12,9 @@ use Welcomattic\MessengerCentral\Worker\TransportActivity;
 use Welcomattic\MessengerCentral\Worker\WorkerProcess;
 use Welcomattic\MessengerCentral\Worker\WorkerStatus;
 
+use function array_push;
 use function array_slice;
+use function ceil;
 use function count;
 use function max;
 use function min;
@@ -43,6 +45,8 @@ final class ActivityView
         DateTimeZone $timezone,
         int $columns,
         int $rows,
+        ?float $restartAt = null,
+        int $restarted = 0,
     ): array {
         $lines = [
             self::title($transport, $workers),
@@ -50,7 +54,7 @@ final class ActivityView
             '',
             ...self::incoming($activity, $now, $columns),
             '',
-            ...self::workers($transport, $workers, $desiredScale, $concurrency, $now),
+            ...self::workers($transport, $workers, $desiredScale, $concurrency, $now, $restartAt, $restarted),
             '',
             ...self::queue($queue),
             '',
@@ -126,12 +130,31 @@ final class ActivityView
         int $desiredScale,
         int $concurrency,
         float $now,
+        ?float $restartAt,
+        int $restarted,
     ): array {
         $lines = [
             Format::bold('Workers')
-                . ($concurrency > 1 ? Format::dim(sprintf('  %d messages at a time each', $concurrency)) : ''),
+                . ($concurrency > 1 ? Format::dim(sprintf('  %d messages at a time each', $concurrency)) : '')
+                . (
+                    $restarted > 0
+                        ? Format::dim(sprintf('  started again %d time%s', $restarted, 1 === $restarted ? '' : 's'))
+                        : ''
+                ),
         ];
+        $restart = null === $restartAt
+            ? []
+            : [Format::color(
+                $restartAt > $now
+                    ? sprintf(' ◌ a worker starts again in %d s', (int) ceil($restartAt - $now))
+                    : ' ◌ a worker starts again…',
+                'yellow',
+            )];
         if ([] === $workers) {
+            if ([] !== $restart) {
+                return [...$lines, ...$restart];
+            }
+
             $lines[] = $transport->consumable
                 ? Format::dim(sprintf(
                     'No worker. Press s to start %d worker%s, + and - to change.',
@@ -150,6 +173,8 @@ final class ActivityView
         if (count($workers) > self::MAX_WORKER_LINES) {
             $lines[] = Format::dim(sprintf('  … and %d more', count($workers) - self::MAX_WORKER_LINES));
         }
+
+        array_push($lines, ...$restart);
 
         return $lines;
     }

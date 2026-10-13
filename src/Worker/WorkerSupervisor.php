@@ -11,14 +11,39 @@ use function array_filter;
 use function array_reverse;
 use function array_values;
 use function count;
+use function min;
 
 /**
  * Starts, scales and stops the workers of every transport.
+ *
+ * Workers that exit by themselves (time, memory or message limit, crash)
+ * are started again while their transport is meant to be consumed: at once
+ * when they stopped normally, after a growing delay when they crashed.
  */
 final class WorkerSupervisor
 {
+    private const float MAX_RESTART_DELAY = 30.0;
+
+    // A worker that crashes after running that long starts the delays over
+    private const float STABLE_AFTER = 60.0;
+
+    // Exited workers kept to be shown, besides the running ones
+    private const int KEPT_EXITED = 3;
+
     /** @var array<string, list<WorkerProcess>> */
     private array $workers = [];
+
+    /** @var array<string, array{count: int, concurrency: int}> the workers each transport is meant to have */
+    private array $desired = [];
+
+    /** @var array<string, list<float>> when to start again the workers that exited by themselves */
+    private array $restarts = [];
+
+    /** @var array<string, int> crashes in a row of the workers of each transport */
+    private array $crashes = [];
+
+    /** @var array<string, int> workers started again, per transport */
+    private array $restarted = [];
 
     /** @var array<string, TransportActivity> */
     private array $activities = [];
@@ -41,6 +66,12 @@ final class WorkerSupervisor
     public function scale(string $transport, int $count, int $concurrency = 1): void
     {
         $now = $this->now();
+        unset($this->restarts[$transport]);
+        $this->desired[$transport] = ['count' => $count, 'concurrency' => $concurrency];
+        if (0 === $count) {
+            unset($this->desired[$transport], $this->crashes[$transport]);
+        }
+
         $this->workers[$transport] = array_values(array_filter(
             $this->workers[$transport] ?? [],
             static fn(WorkerProcess $worker): bool => $worker->status->isAlive(),
@@ -59,17 +90,7 @@ final class WorkerSupervisor
         }
 
         for ($i = count($kept); $i < $count; ++$i) {
-            $id = $this->nextId++;
-            $worker = new WorkerProcess(
-                $id,
-                $transport,
-                $this->processFactory->create($transport, $id, $concurrency),
-                $now,
-                $concurrency,
-                $this->stopTimeout,
-            );
-            $worker->start();
-            $this->workers[$transport][] = $worker;
+            $this->spawn($transport, $concurrency, $now);
         }
 
         foreach (array_reverse($kept) as $i => $worker) {
@@ -94,6 +115,8 @@ final class WorkerSupervisor
     {
         $timeout ??= $this->stopTimeout;
         $now = $this->now();
+        $this->desired = [];
+        $this->restarts = [];
         foreach ($this->workers as $workers) {
             foreach ($workers as $worker) {
                 $worker->stop($now);
@@ -132,11 +155,45 @@ final class WorkerSupervisor
                     $changed = true;
                 }
 
-                $changed = $changed || $status !== $worker->status;
+                if ($status === $worker->status) {
+                    continue;
+                }
+
+                $changed = true;
+                if (WorkerStatus::Exited === $worker->status) {
+                    $this->exited($worker, $now);
+                }
             }
         }
 
-        return $changed;
+        return $this->restart($now) || $changed;
+    }
+
+    /**
+     * How many workers the transport is meant to have, whether they run or
+     * are about to be started again.
+     */
+    public function desired(string $transport): int
+    {
+        return $this->desired[$transport]['count'] ?? 0;
+    }
+
+    /**
+     * When the next worker of the transport is started again, if one is waiting.
+     */
+    public function nextRestart(string $transport): ?float
+    {
+        $restarts = $this->restarts[$transport] ?? [];
+
+        return [] === $restarts ? null : min($restarts);
+    }
+
+    /**
+     * How many workers of the transport were started again since the dashboard started.
+     */
+    public function restarted(string $transport): int
+    {
+        return $this->restarted[$transport] ?? 0;
     }
 
     /**
@@ -177,6 +234,92 @@ final class WorkerSupervisor
         }
 
         return false;
+    }
+
+    private function spawn(string $transport, int $concurrency, float $now): void
+    {
+        $id = $this->nextId++;
+        $worker = new WorkerProcess(
+            $id,
+            $transport,
+            $this->processFactory->create($transport, $id, $concurrency),
+            $now,
+            $concurrency,
+            $this->stopTimeout,
+        );
+        $worker->start();
+        $this->workers[$transport][] = $worker;
+    }
+
+    /**
+     * Plans to start again a worker that exited by itself.
+     */
+    private function exited(WorkerProcess $worker, float $now): void
+    {
+        $transport = $worker->transport;
+        if (!isset($this->desired[$transport]) || $worker->stopRequested()) {
+            return;
+        }
+
+        if ($worker->exitedCleanly()) {
+            $this->crashes[$transport] = 0;
+            $this->restarts[$transport][] = $now;
+
+            return;
+        }
+
+        // 1, 2, 4... seconds, so that a worker that cannot start does not loop
+        $crashes = ($now - $worker->startedAt) >= self::STABLE_AFTER ? 1 : ($this->crashes[$transport] ?? 0) + 1;
+        $this->crashes[$transport] = $crashes;
+        $this->restarts[$transport][] = $now + min(self::MAX_RESTART_DELAY, 2 ** ($crashes - 1));
+    }
+
+    /**
+     * @return bool whether a worker was started
+     */
+    private function restart(float $now): bool
+    {
+        $started = false;
+        foreach ($this->restarts as $transport => $restarts) {
+            $desired = $this->desired[$transport] ?? null;
+            $pending = [];
+            foreach ($restarts as $at) {
+                if ($at > $now) {
+                    $pending[] = $at;
+
+                    continue;
+                }
+
+                if (null !== $desired && count($this->active($transport)) < $desired['count']) {
+                    $this->spawn($transport, $desired['concurrency'], $now);
+                    $this->restarted[$transport] = $this->restarted($transport) + 1;
+                    $started = true;
+                }
+            }
+
+            $this->restarts[$transport] = $pending;
+            $this->prune($transport);
+        }
+
+        return $started;
+    }
+
+    /**
+     * Forgets the oldest exited workers, which pile up as workers are started again.
+     */
+    private function prune(string $transport): void
+    {
+        $exited = 0;
+        $kept = [];
+        foreach (array_reverse($this->workers[$transport] ?? []) as $worker) {
+            if (WorkerStatus::Exited === $worker->status && ++$exited > self::KEPT_EXITED) {
+                continue;
+            }
+
+            $kept[] = $worker;
+        }
+
+        $this->workers[$transport] = array_reverse($kept);
     }
 
     private function now(): float

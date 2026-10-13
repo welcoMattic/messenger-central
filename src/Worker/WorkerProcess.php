@@ -156,6 +156,14 @@ final class WorkerProcess
     }
 
     /**
+     * Whether the dashboard asked the worker to stop.
+     */
+    public function stopRequested(): bool
+    {
+        return null !== $this->stopRequestedAt;
+    }
+
+    /**
      * Whether the worker exited normally, or because it was asked to stop.
      */
     public function exitedCleanly(): bool

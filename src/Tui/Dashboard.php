@@ -652,7 +652,8 @@ final class Dashboard
             return;
         }
 
-        if ([] !== $this->supervisor->active($transport)) {
+        // Workers waiting to be started again count as running
+        if ($this->supervisor->desired($transport) > 0) {
             $this->supervisor->stop($transport);
             $this->notify(sprintf('Stopping the workers of "%s".', $transport));
 
@@ -684,7 +685,7 @@ final class Dashboard
             return;
         }
 
-        $running = count($this->supervisor->active($transport));
+        $running = $this->supervisor->desired($transport);
         $maximum = max(1, intdiv(self::MAX_SLOTS, $this->concurrency($transport)));
         $scale = max(1, min($maximum, ($running > 0 ? $running : $this->scale($transport)) + $delta));
         $this->scales[$transport] = $scale;
@@ -731,7 +732,7 @@ final class Dashboard
 
     private function maxConcurrency(string $transport): int
     {
-        $workers = count($this->supervisor->active($transport));
+        $workers = $this->supervisor->desired($transport);
 
         return max(1, intdiv(self::MAX_SLOTS, $workers > 0 ? $workers : $this->scale($transport)));
     }
@@ -751,7 +752,7 @@ final class Dashboard
         }
 
         $this->concurrencies[$transport] = $concurrency;
-        $running = count($this->supervisor->active($transport));
+        $running = $this->supervisor->desired($transport);
         if (0 === $running) {
             $this->notify(sprintf(
                 'Workers of "%s" will handle %d message%s at a time.',
@@ -827,12 +828,11 @@ final class Dashboard
                 'label' => sprintf('  ├ Message classes (%d)', count($transport->messageClasses)),
             ];
             if ($transport->canRunWorkers()) {
-                $active = count($this->supervisor->active($name));
                 $rows[] = [
                     'key' => 'action:workers:' . $name,
-                    'label' => 0 === $active
+                    'label' => 0 === $this->supervisor->desired($name)
                         ? sprintf('  ├ Start workers (×%d)', $this->scale($name))
-                        : sprintf('  ├ Stop workers (%d running)', $active),
+                        : sprintf('  ├ Stop workers (%d running)', count($this->supervisor->active($name))),
                 ];
                 if ($this->parallel) {
                     $rows[] = [
@@ -939,6 +939,8 @@ final class Dashboard
                 $this->timezone,
                 $columns,
                 $rows,
+                $this->supervisor->nextRestart($selected),
+                $this->supervisor->restarted($selected),
             ),
         };
     }

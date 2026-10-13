@@ -7,6 +7,7 @@ namespace Welcomattic\MessengerCentral\Tests\Worker;
 use Closure;
 use PHPUnit\Framework\Attributes\RequiresPhpExtension;
 use PHPUnit\Framework\TestCase;
+use Symfony\Component\Clock\MockClock;
 use Welcomattic\MessengerCentral\Worker\WorkerProcess;
 use Welcomattic\MessengerCentral\Worker\WorkerStatus;
 use Welcomattic\MessengerCentral\Worker\WorkerSupervisor;
@@ -14,6 +15,7 @@ use Welcomattic\MessengerCentral\Worker\WorkerSupervisor;
 use function array_column;
 use function array_map;
 use function array_slice;
+use function count;
 use function in_array;
 use function microtime;
 use function usleep;
@@ -186,6 +188,77 @@ final class WorkerSupervisorTest extends TestCase
         static::assertFalse($this->supervisor->hasRunning());
         static::assertGreaterThanOrEqual(0.5, microtime(true) - $startedAt, 'It waited for the worker');
         static::assertTrue($this->supervisor->workers('async')[0]->exitedCleanly(), 'It was asked to stop');
+    }
+
+    public function testItStartsAgainTheWorkersThatStopByThemselves(): void
+    {
+        // Given
+        $this->factory->mode = 'limit';
+
+        // When
+        $this->supervisor->scale('async', 1);
+        $this->waitUntil(fn(): bool => $this->supervisor->restarted('async') >= 2);
+
+        // Then
+        static::assertSame(1, $this->supervisor->desired('async'));
+        static::assertGreaterThanOrEqual(3, count($this->factory->created));
+        static::assertLessThanOrEqual(
+            4,
+            count($this->supervisor->workers('async')),
+            'Old exited workers are forgotten',
+        );
+
+        // When
+        $this->supervisor->stop('async');
+        $this->waitUntil(fn(): bool => !$this->supervisor->hasRunning());
+        $created = count($this->factory->created);
+        $this->supervisor->poll();
+
+        // Then
+        static::assertSame(0, $this->supervisor->desired('async'));
+        static::assertSame($created, count($this->factory->created));
+    }
+
+    public function testItWaitsLongerAndLongerBeforeStartingCrashedWorkersAgain(): void
+    {
+        // Given
+        $clock = new MockClock();
+        $this->supervisor = new WorkerSupervisor($this->factory, $clock);
+        $this->factory->mode = 'crash';
+        $this->supervisor->scale('async', 1);
+
+        // When
+        $this->waitUntil(fn(): bool => null !== $this->supervisor->nextRestart('async'));
+        $firstCrash = (float) $clock->now()->getTimestamp() + ($clock->now()->getMicrosecond() / 1_000_000);
+
+        // Then
+        static::assertSame($firstCrash + 1, $this->supervisor->nextRestart('async'));
+        static::assertCount(1, $this->factory->created, 'Not started again before the delay');
+
+        // When
+        $clock->sleep(1);
+        $this->supervisor->poll();
+        $this->waitUntil(fn(): bool => null !== $this->supervisor->nextRestart('async'));
+
+        // Then
+        static::assertCount(2, $this->factory->created);
+        static::assertSame($firstCrash + 3, $this->supervisor->nextRestart('async'), 'Then after 2 seconds');
+    }
+
+    public function testItDoesNotStartAgainTheWorkersItStops(): void
+    {
+        // Given
+        $this->supervisor->scale('async', 2);
+        $this->waitUntil(fn(): bool => $this->allIdle('async'));
+
+        // When
+        $this->supervisor->scale('async', 1);
+        $this->waitUntil(fn(): bool => 1 === $this->alive('async'));
+        $this->supervisor->poll();
+
+        // Then
+        static::assertCount(2, $this->factory->created);
+        static::assertNull($this->supervisor->nextRestart('async'));
     }
 
     private function allIdle(string $transport): bool

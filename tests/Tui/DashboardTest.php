@@ -193,6 +193,23 @@ final class DashboardTest extends TestCase
         static::assertStringContainsString('"sync" cannot be consumed.', $screen);
     }
 
+    public function testItStopsWorkersThatWaitToStartAgain(): void
+    {
+        // Given: a worker that crashes, started again after a delay
+        $this->factory->mode = 'crash';
+        $this->dashboard->input('s');
+        $this->waitFor('a worker starts again in');
+
+        // When
+        $this->dashboard->input('s');
+        $screen = $this->tick();
+
+        // Then
+        static::assertSame(0, $this->supervisor->desired('async'));
+        static::assertNull($this->supervisor->nextRestart('async'));
+        static::assertStringContainsString('Stopping the workers of "async".', $screen);
+    }
+
     public function testItDoesNotStartWorkersOnAFailureTransport(): void
     {
         // Given
