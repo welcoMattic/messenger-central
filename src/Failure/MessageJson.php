@@ -10,13 +10,15 @@ use DateTimeImmutable;
 use DateTimeInterface;
 use Exception;
 use JsonException;
+use PropertyHookType;
 use ReflectionClass;
 use ReflectionEnum;
 use ReflectionEnumBackedCase;
 use ReflectionNamedType;
+use ReflectionParameter;
 use ReflectionProperty;
 use ReflectionType;
-use TypeError;
+use Throwable;
 use UnitEnum;
 
 use function array_is_list;
@@ -202,38 +204,23 @@ final class MessageJson
     }
 
     /**
+     * Copies an object with the properties of the document. Its constructor
+     * does not run: the object already went through it.
+     *
      * @param class-string            $class
      * @param array<array-key, mixed> $data
      */
-    private static function importObject(string $class, ?object $template, array $data, string $path): object
+    private static function importObject(string $class, object $template, array $data, string $path): object
     {
         $stored = self::stored($class);
         $named = self::named($stored);
-        foreach ($data as $name => $_) {
-            if (!isset($named[(string) $name])) {
-                throw new FailedMessageException(sprintf(
-                    '"%s" is not a property of %s.',
-                    self::path($path, (string) $name),
-                    $class,
-                ));
-            }
-        }
+        self::checkKeys($class, $data, $named, [], $path);
 
         $object = new ReflectionClass($class)->newInstanceWithoutConstructor();
         foreach ($stored as $property) {
             $value = self::propertyValue($property, $named[$property->name] === $property, $template, $data, $path);
-            if (null === $value) {
-                continue;
-            }
-
-            try {
-                $property->setRawValue($object, $value[0]);
-            } catch (TypeError $error) { // @mago-expect analysis:avoid-catching-error the type of an edited value is only known here
-                throw new FailedMessageException(sprintf(
-                    '"%s": %s',
-                    self::path($path, $property->name),
-                    $error->getMessage(),
-                ));
+            if (null !== $value) {
+                self::assign($property, $object, $value[0], $value[1], $path);
             }
         }
 
@@ -241,27 +228,170 @@ final class MessageJson
     }
 
     /**
+     * Builds a new object through its constructor, with the properties of
+     * the document: nothing exists to start from.
+     *
+     * @param class-string            $class
+     * @param array<array-key, mixed> $data
+     */
+    private static function instantiate(string $class, array $data, string $path): object
+    {
+        $reflection = new ReflectionClass($class);
+        $constructor = $reflection->getConstructor();
+        /** @var array<string, ReflectionParameter> $parameters */
+        $parameters = [];
+        if (null !== $constructor && $constructor->isPublic()) {
+            foreach ($constructor->getParameters() as $parameter) {
+                $parameters[$parameter->name] = $parameter;
+            }
+        }
+
+        $named = self::named(self::stored($class));
+        self::checkKeys($class, $data, $named, $parameters, $path);
+
+        $arguments = [];
+        foreach ($parameters as $name => $parameter) {
+            $argument = self::argument($class, $parameter, $data, $path);
+            if (null !== $argument) {
+                $arguments[$name] = $argument[0];
+            }
+        }
+
+        // A class whose constructor is not public cannot be built through it
+        $callable = null === $constructor || $constructor->isPublic();
+        try {
+            $object = $callable
+                ? $reflection->newInstanceArgs($arguments)
+                : $reflection->newInstanceWithoutConstructor();
+        } catch (Throwable $error) {
+            throw new FailedMessageException(sprintf(
+                '"%s": %s cannot be built: %s',
+                $path,
+                $class,
+                $error->getMessage(),
+            ));
+        }
+
+        if (null === $object) {
+            throw new FailedMessageException(sprintf('"%s": %s cannot be built.', $path, $class));
+        }
+
+        // The properties the constructor does not take
+        foreach ($data as $name => $value) {
+            $name = (string) $name;
+            if (!isset($parameters[$name]) && isset($named[$name])) {
+                $property = $named[$name];
+                self::assign(
+                    $property,
+                    $object,
+                    self::importTyped($value, $property->getType(), self::path($path, $name)),
+                    true,
+                    $path,
+                );
+            }
+        }
+
+        return $object;
+    }
+
+    /**
+     * @param class-string            $class
+     * @param array<array-key, mixed> $data
+     *
+     * @return array{mixed}|null the value given to the parameter, null to use its default
+     */
+    private static function argument(string $class, ReflectionParameter $parameter, array $data, string $path): ?array
+    {
+        $name = $parameter->name;
+        if (isset($data[$name]) || array_key_exists($name, $data)) {
+            return [self::importTyped($data[$name], $parameter->getType(), self::path($path, $name))];
+        }
+
+        if ($parameter->isOptional()) {
+            return null;
+        }
+
+        if ($parameter->allowsNull()) {
+            return [null];
+        }
+
+        throw new FailedMessageException(sprintf('"%s" is missing to build %s.', self::path($path, $name), $class));
+    }
+
+    /**
+     * @param class-string                       $class
+     * @param array<array-key, mixed>            $data
+     * @param array<string, ReflectionProperty>  $properties
+     * @param array<string, ReflectionParameter> $parameters of the constructor
+     */
+    private static function checkKeys(
+        string $class,
+        array $data,
+        array $properties,
+        array $parameters,
+        string $path,
+    ): void {
+        foreach ($data as $name => $_) {
+            $name = (string) $name;
+            if (!isset($properties[$name]) && !isset($parameters[$name])) {
+                throw new FailedMessageException(sprintf(
+                    '"%s" is not a property of %s.',
+                    self::path($path, $name),
+                    $class,
+                ));
+            }
+        }
+    }
+
+    /**
+     * @param bool $edited whether the value comes from the document, and not from the copied object
+     */
+    private static function assign(
+        ReflectionProperty $property,
+        object $object,
+        mixed $value,
+        bool $edited,
+        string $path,
+    ): void {
+        try {
+            // The hook checks or changes what was typed
+            $edited && $property->hasHook(PropertyHookType::Set)
+                ? $property->setValue($object, $value)
+                : $property->setRawValue($object, $value);
+        } catch (Throwable $error) {
+            throw new FailedMessageException(sprintf(
+                '"%s": %s',
+                self::path($path, $property->name),
+                $error->getMessage(),
+            ));
+        }
+    }
+
+    /**
      * @param bool                    $shown whether the property is in the document
      * @param array<array-key, mixed> $data
      *
-     * @return array{mixed}|null null when the property stays uninitialized
+     * @return array{mixed, bool}|null the value, and whether it was edited; null when it stays uninitialized
      */
     private static function propertyValue(
         ReflectionProperty $property,
         bool $shown,
-        ?object $template,
+        object $template,
         array $data,
         string $path,
     ): ?array {
         $name = $property->name;
-        $original = null !== $template && $property->isInitialized($template)
-            ? [$property->getRawValue($template)]
-            : null;
+        $original = $property->isInitialized($template) ? [$property->getRawValue($template)] : null;
         if (!$shown || !array_key_exists($name, $data)) {
-            return $original;
+            return null === $original ? null : [$original[0], false];
         }
 
-        return [self::importValue($data[$name], $original, $property->getType(), self::path($path, $name))];
+        $kept = [];
+        if (null !== $original && self::exportValue($original[0], $name, $kept, [], 0) === [$data[$name]]) {
+            return [$original[0], false];
+        }
+
+        return [self::importValue($data[$name], $original, $property->getType(), self::path($path, $name)), true];
     }
 
     /**
@@ -365,7 +495,7 @@ final class MessageJson
         }
 
         if (is_array($value) && class_exists($class) && self::isEditable($class)) {
-            return self::importObject($class, null, $value, $path);
+            return self::instantiate($class, $value, $path);
         }
 
         return $value;

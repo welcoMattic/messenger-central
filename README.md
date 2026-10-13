@@ -179,6 +179,9 @@ back with your changes, `Esc` cancels.
   the properties of the message, private and read-only ones included, and of
   the objects it contains. Enums are written with their value (or the name of
   their case), dates as strings.
+- Edited objects are copied without running their constructor, but the set
+  hooks of the properties you change do run. An object that did not exist, in
+  a property that was `null`, is built through its constructor.
 - Values that JSON cannot hold, like closures or instances of PHP classes
   other than dates, are left out and kept as they are. A message that is itself
   an instance of a PHP class, like a message that could not be decoded, cannot

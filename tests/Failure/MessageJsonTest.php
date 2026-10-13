@@ -14,6 +14,7 @@ use Welcomattic\MessengerCentral\Failure\FailedMessageException;
 use Welcomattic\MessengerCentral\Failure\MessageJson;
 use Welcomattic\MessengerCentral\Tests\Failure\Fixtures\Address;
 use Welcomattic\MessengerCentral\Tests\Failure\Fixtures\Line;
+use Welcomattic\MessengerCentral\Tests\Failure\Fixtures\Parcel;
 use Welcomattic\MessengerCentral\Tests\Failure\Fixtures\PlaceOrder;
 use Welcomattic\MessengerCentral\Tests\Failure\Fixtures\Priority;
 use Welcomattic\MessengerCentral\Tests\Failure\Fixtures\Status;
@@ -145,6 +146,36 @@ final class MessageJsonTest extends TestCase
         MessageJson::import(new ArrayObject(), '{}');
     }
 
+    public function testItRunsTheSetHooksOfTheEditedProperties(): void
+    {
+        // Given
+        $parcel = new Parcel('ups');
+
+        // When
+        $imported = MessageJson::import($parcel, '{"carrier": "dhl", "weight": 2}');
+        $unchanged = MessageJson::import($parcel, '{"carrier": "UPS", "weight": 3}');
+
+        // Then
+        static::assertInstanceOf(Parcel::class, $imported);
+        static::assertSame('DHL', $imported->carrier);
+        static::assertSame(2, $imported->weight);
+        static::assertInstanceOf(Parcel::class, $unchanged);
+        static::assertSame('UPS', $unchanged->carrier);
+    }
+
+    public function testItBuildsNewObjectsThroughTheirConstructor(): void
+    {
+        // When
+        $imported = MessageJson::import(new Parcel('ups'), '{"next": {"carrier": "fedex"}}');
+
+        // Then: the defaults of the constructor are applied
+        static::assertInstanceOf(Parcel::class, $imported);
+        static::assertInstanceOf(Parcel::class, $imported->next);
+        static::assertSame('FEDEX', $imported->next->carrier);
+        static::assertSame(1, $imported->next->weight);
+        static::assertNull($imported->next->next);
+    }
+
     /**
      * @return iterable<string, array{string, string}>
      */
@@ -176,6 +207,36 @@ final class MessageJsonTest extends TestCase
         yield 'invalid date' => ['{"placedAt": "someday"}', '"placedAt": "someday" is not a date.'];
         yield 'object expected' => ['{"shipping": "Paris"}', '"shipping" must be a JSON object.'];
         yield 'not editable' => ['{"callback": "strlen"}', '"callback" cannot be edited.'];
+        yield 'missing in a new object' => [
+            '{"billing": {"street": "3 place Garibaldi"}}',
+            '"billing.city" is missing to build ' . Address::class . '.',
+        ];
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function invalidParcels(): iterable
+    {
+        yield 'missing in a new object' => [
+            '{"next": {"weight": 2}}',
+            '"next.carrier" is missing to build ' . Parcel::class . '.',
+        ];
+        yield 'refused by the constructor' => [
+            '{"next": {"carrier": ""}}',
+            '"next": ' . Parcel::class . ' cannot be built: A parcel needs a carrier.',
+        ];
+    }
+
+    #[DataProvider('invalidParcels')]
+    public function testItRefusesANewObjectThatItsConstructorRefuses(string $json, string $error): void
+    {
+        // Then
+        $this->expectException(FailedMessageException::class);
+        $this->expectExceptionMessage($error);
+
+        // When
+        MessageJson::import(new Parcel('ups'), $json);
     }
 
     #[DataProvider('invalidDocuments')]
