@@ -156,6 +156,14 @@ final class WorkerProcess
     }
 
     /**
+     * When the worker is killed if it did not stop by then.
+     */
+    public function killAt(): ?float
+    {
+        return null === $this->stopRequestedAt ? null : $this->stopRequestedAt + $this->stopTimeout;
+    }
+
+    /**
      * Whether the dashboard asked the worker to stop.
      */
     public function stopRequested(): bool

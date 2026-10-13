@@ -44,6 +44,7 @@ use Welcomattic\MessengerCentral\Worker\WorkerSupervisor;
 use function array_slice;
 use function array_values;
 use function bin2hex;
+use function ceil;
 use function constant;
 use function count;
 use function ctype_digit;
@@ -134,8 +135,11 @@ final class Dashboard
     /** @var array{transport: string, value: string}|null the concurrency being typed */
     private ?array $prompt = null;
 
-    /** @var array{question: string, action: Closure(): void}|null an action waiting to be confirmed */
+    /** @var array{question: string, action: Closure(): void, quit: bool}|null an action waiting to be confirmed */
     private ?array $confirmation = null;
+
+    // When quitting started: the dashboard waits for its workers to stop
+    private ?float $quittingAt = null;
 
     /** @var array<string, int> the page of failed messages shown, per failure transport, from 0 */
     private array $failedPages = [];
@@ -248,8 +252,10 @@ final class Dashboard
                 continue;
             }
 
+            // A terminal that went away cannot show the workers stopping
+            $handler = 'SIGHUP' === $signal ? $this->tui->stop(...) : $this->onQuitSignal(...);
             try {
-                $callbacks[] = EventLoop::onSignal((int) constant($signal), $this->tui->stop(...));
+                $callbacks[] = EventLoop::onSignal((int) constant($signal), $handler);
             } catch (UnsupportedFeatureException) {
                 // Signals are not supported without ext-pcntl
                 continue;
@@ -298,6 +304,11 @@ final class Dashboard
     {
         $now = $this->now();
         $changed = $this->supervisor->poll();
+        if (null !== $this->quittingAt && !$this->supervisor->hasRunning()) {
+            $this->tui->stop();
+
+            return;
+        }
 
         if (null !== $this->selected && ($now - $this->selectedQueueAt) >= self::SELECTED_QUEUE_INTERVAL) {
             $this->selectedQueueAt = $now;
@@ -357,6 +368,16 @@ final class Dashboard
         return null !== $this->editing;
     }
 
+    public function isRunning(): bool
+    {
+        return $this->tui->isRunning();
+    }
+
+    public function isQuitting(): bool
+    {
+        return null !== $this->quittingAt;
+    }
+
     /**
      * Asks for the queue of a transport, less and less often while it fails.
      */
@@ -384,6 +405,16 @@ final class Dashboard
     private function onInput(InputEvent $event): void
     {
         $data = $event->getData();
+        if (null !== $this->quittingAt) {
+            // Quitting again kills the workers that are still stopping
+            $event->stopPropagation();
+            if ($this->keybindings->matches($data, 'quit')) {
+                $this->killAndQuit();
+            }
+
+            return;
+        }
+
         $editing = $this->editing;
         if (null !== $editing) {
             // The editor takes every key, like the ones that move the focus
@@ -398,7 +429,7 @@ final class Dashboard
         if (null !== $confirmation) {
             // Other keys are ignored, so that a confirmation is not lost by mistake
             $event->stopPropagation();
-            $this->onConfirmationInput($data, $confirmation['action']);
+            $this->onConfirmationInput($data, $confirmation['action'], $confirmation['quit']);
             $this->refresh();
 
             return;
@@ -430,7 +461,8 @@ final class Dashboard
 
         $event->stopPropagation();
         if ('quit' === $action) {
-            $this->tui->stop();
+            $this->requestQuit();
+            $this->refresh();
 
             return;
         }
@@ -463,9 +495,17 @@ final class Dashboard
 
     /**
      * @param Closure(): void $action
+     * @param bool            $quit   whether quitting again confirms, like Ctrl+C twice
      */
-    private function onConfirmationInput(string $data, Closure $action): void
+    private function onConfirmationInput(string $data, Closure $action, bool $quit): void
     {
+        if ($quit && $this->keybindings->matches($data, 'quit')) {
+            $this->confirmation = null;
+            $action();
+
+            return;
+        }
+
         if ($this->confirmKeybindings->matches($data, 'no')) {
             $this->confirmation = null;
 
@@ -559,9 +599,57 @@ final class Dashboard
     /**
      * @param Closure(): void $action
      */
-    private function confirm(string $question, Closure $action): void
+    private function confirm(string $question, Closure $action, bool $quit = false): void
     {
-        $this->confirmation = ['question' => $question, 'action' => $action];
+        $this->confirmation = ['question' => $question, 'action' => $action, 'quit' => $quit];
+    }
+
+    /**
+     * Quits at once without workers, asks first otherwise.
+     */
+    private function requestQuit(): void
+    {
+        $workers = $this->supervisor->stopping()['workers'];
+        if (0 === $workers) {
+            $this->tui->stop();
+
+            return;
+        }
+
+        $this->confirm(
+            sprintf('Stop %s and quit?', 1 === $workers ? 'the worker' : sprintf('the %d workers', $workers)),
+            $this->beginQuit(...),
+            quit: true,
+        );
+    }
+
+    /**
+     * Stops the workers, letting them finish their messages, and quits once they are all gone.
+     */
+    private function beginQuit(): void
+    {
+        $this->quittingAt = $this->now();
+        $this->confirmation = null;
+        $this->prompt = null;
+        $this->supervisor->stopEach();
+        $this->refresh();
+    }
+
+    private function killAndQuit(): void
+    {
+        $this->supervisor->killAll();
+        $this->tui->stop();
+    }
+
+    private function onQuitSignal(): void
+    {
+        if (null === $this->quittingAt) {
+            $this->beginQuit();
+
+            return;
+        }
+
+        $this->killAndQuit();
     }
 
     private function confirmRemove(string $transport): void
@@ -1197,6 +1285,37 @@ final class Dashboard
             if (null !== $editing['error']) {
                 $lines[] = ' ' . Format::color(Format::safe($editing['error']), 'red');
             }
+
+            return $lines;
+        }
+
+        if (null !== $this->quittingAt) {
+            $stopping = $this->supervisor->stopping();
+            $lines[] = sprintf(
+                ' %s  %s',
+                Format::color(
+                    sprintf(
+                        'Stopping %d worker%s%s…',
+                        $stopping['workers'],
+                        1 === $stopping['workers'] ? '' : 's',
+                        $stopping['messages'] > 0
+                            ? sprintf(
+                                ', finishing %d message%s',
+                                $stopping['messages'],
+                                1 === $stopping['messages'] ? '' : 's',
+                            )
+                            : '',
+                    ),
+                    'yellow',
+                ),
+                Format::dim(
+                    (
+                        null === $stopping['kill_at']
+                            ? ''
+                            : sprintf('killed in %d s  ', max(0, (int) ceil($stopping['kill_at'] - $now)))
+                    ) . 'q kill now',
+                ),
+            );
 
             return $lines;
         }

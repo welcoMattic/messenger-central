@@ -108,12 +108,11 @@ final class WorkerSupervisor
     }
 
     /**
-     * Stops every worker, waiting for them at most $timeout seconds (the
-     * stop timeout by default) before killing them.
+     * Asks every worker to stop, without waiting for them: poll() kills the
+     * ones still running after the stop timeout.
      */
-    public function stopAll(?float $timeout = null): void
+    public function stopEach(): void
     {
-        $timeout ??= $this->stopTimeout;
         $now = $this->now();
         $this->desired = [];
         $this->restarts = [];
@@ -122,6 +121,58 @@ final class WorkerSupervisor
                 $worker->stop($now);
             }
         }
+    }
+
+    /**
+     * Kills every worker now.
+     */
+    public function killAll(): void
+    {
+        $this->desired = [];
+        $this->restarts = [];
+        foreach ($this->workers as $workers) {
+            foreach ($workers as $worker) {
+                $worker->terminate(0.0);
+            }
+        }
+
+        $this->poll();
+    }
+
+    /**
+     * @return array{workers: int, messages: int, kill_at: float|null} the workers still running, the messages
+     *                                                                they handle, and when the first one is killed
+     */
+    public function stopping(): array
+    {
+        $running = 0;
+        $messages = 0;
+        $killAt = null;
+        foreach ($this->workers as $workers) {
+            foreach ($workers as $worker) {
+                if (!$worker->status->isAlive()) {
+                    continue;
+                }
+
+                ++$running;
+                $messages += count($worker->inFlight);
+                $at = $worker->killAt();
+                $killAt = null === $at ? $killAt : min($at, $killAt ?? $at);
+            }
+        }
+
+        return ['workers' => $running, 'messages' => $messages, 'kill_at' => $killAt];
+    }
+
+    /**
+     * Stops every worker, waiting for them at most $timeout seconds (the
+     * stop timeout by default) before killing them.
+     */
+    public function stopAll(?float $timeout = null): void
+    {
+        $timeout ??= $this->stopTimeout;
+        $now = $this->now();
+        $this->stopEach();
 
         $deadline = $now + $timeout;
         while ($this->hasRunning() && $this->now() < $deadline) {

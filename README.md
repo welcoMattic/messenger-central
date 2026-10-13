@@ -159,7 +159,9 @@ seconds, so that one that cannot start does not loop.
 
 When you stop workers or quit, they get `SIGTERM` and finish their current
 messages; the ones still running after the stop timeout (10 seconds by default)
-are killed. If the dashboard itself is killed, its workers notice it and stop
+are killed. Quitting asks first when workers run, then shows them stopping:
+`q` again kills them at once. `SIGTERM` and `SIGINT` sent to the dashboard
+quit the same way. If the dashboard itself is killed, its workers notice it and stop
 after their current messages.
 
 ### Failed messages

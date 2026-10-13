@@ -196,6 +196,67 @@ final class DashboardTest extends TestCase
         static::assertStringContainsString('"sync" cannot be consumed.', $screen);
     }
 
+    public function testItQuitsAtOnceWithoutWorkers(): void
+    {
+        // When
+        $this->dashboard->input('q');
+
+        // Then
+        static::assertFalse($this->dashboard->isRunning());
+    }
+
+    public function testItAsksBeforeStoppingTheWorkersToQuit(): void
+    {
+        // Given
+        $this->dashboard->input('s');
+        $this->waitFor('✓ 2 processed');
+
+        // When
+        $this->dashboard->input('q');
+        $screen = $this->tick();
+
+        // Then
+        static::assertStringContainsString('Stop the worker and quit?   y yes  n no', $screen);
+
+        // When
+        $this->dashboard->input('n');
+        $this->tick();
+
+        // Then
+        static::assertTrue($this->dashboard->isRunning());
+        static::assertTrue($this->supervisor->hasRunning());
+
+        // When
+        $this->dashboard->input('q');
+        $this->dashboard->input('y');
+        $screen = $this->tick();
+
+        // Then
+        static::assertTrue($this->dashboard->isQuitting());
+        static::assertStringContainsString('Stopping 1 worker…', $screen);
+        static::assertStringContainsString('q kill now', $screen);
+        $this->waitUntilStopped();
+        static::assertFalse($this->supervisor->hasRunning());
+    }
+
+    public function testQuittingTwiceKillsTheWorkers(): void
+    {
+        // Given: a worker that does not stop when asked
+        $this->factory->mode = 'stubborn';
+        $this->dashboard->input('s');
+        $this->waitFor('✓ 2 processed');
+
+        // When: Ctrl+C twice confirms
+        $this->dashboard->input("\x03");
+        $this->dashboard->input("\x03");
+        $this->tick();
+        $this->dashboard->input('q');
+
+        // Then
+        static::assertFalse($this->dashboard->isRunning());
+        static::assertFalse($this->supervisor->hasRunning());
+    }
+
     public function testItStopsWorkersThatWaitToStartAgain(): void
     {
         // Given: a worker that crashes, started again after a delay
@@ -751,6 +812,17 @@ final class DashboardTest extends TestCase
         $this->dashboard->input("\r");
 
         return $this->tick();
+    }
+
+    private function waitUntilStopped(float $timeout = 5.0): void
+    {
+        $deadline = microtime(true) + $timeout;
+        while ($this->dashboard->isRunning() && microtime(true) < $deadline) {
+            $this->dashboard->tick();
+            usleep(20_000);
+        }
+
+        static::assertFalse($this->dashboard->isRunning(), 'The dashboard did not quit in time');
     }
 
     private function tick(): string
