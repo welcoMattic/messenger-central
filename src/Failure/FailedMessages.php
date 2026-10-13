@@ -7,7 +7,9 @@ namespace Welcomattic\MessengerCentral\Failure;
 use Psr\Container\ContainerInterface;
 use Symfony\Component\Messenger\Envelope;
 use Symfony\Component\Messenger\Stamp\DelayStamp;
+use Symfony\Component\Messenger\Stamp\ErrorDetailsStamp;
 use Symfony\Component\Messenger\Stamp\NonSendableStampInterface;
+use Symfony\Component\Messenger\Stamp\RedeliveryStamp;
 use Symfony\Component\Messenger\Stamp\SentToFailureTransportStamp;
 use Symfony\Component\Messenger\Stamp\StampInterface;
 use Symfony\Component\Messenger\Stamp\TransportMessageIdStamp;
@@ -18,6 +20,7 @@ use Welcomattic\MessengerCentral\Transport\QueueInspector;
 use function array_push;
 use function in_array;
 use function is_a;
+use function max;
 use function sprintf;
 
 /**
@@ -54,6 +57,18 @@ final readonly class FailedMessages
         $description = QueueInspector::describe($envelope);
         $export = MessageJson::export($envelope->getMessage());
 
+        $errors = [];
+        $trace = null;
+        foreach ($envelope->all(ErrorDetailsStamp::class) as $stamp) {
+            $errors[] = $stamp->getExceptionClass() . ': ' . $stamp->getExceptionMessage();
+            $trace = $stamp->getFlattenException()?->getTraceAsString() ?? $trace;
+        }
+
+        $retries = 0;
+        foreach ($envelope->all(RedeliveryStamp::class) as $stamp) {
+            $retries = max($retries, $stamp->getRetryCount());
+        }
+
         return new FailedMessage(
             $id,
             $description['class'],
@@ -62,7 +77,78 @@ final readonly class FailedMessages
             $description['error'],
             $export['json'] ?? null,
             $export['kept'] ?? [],
+            $errors,
+            $trace,
+            $retries,
         );
+    }
+
+    /**
+     * Removes a failed message for good.
+     *
+     * @return string the class of the message
+     *
+     * @throws FailedMessageException when the message is not there anymore
+     */
+    public function remove(string $failureTransport, string $id): string
+    {
+        $receiver = $this->receiver($failureTransport);
+        $envelope = $receiver->find($id);
+        if (null === $envelope) {
+            throw new FailedMessageException(sprintf(
+                'The message #%s is not in "%s" anymore.',
+                $id,
+                $failureTransport,
+            ));
+        }
+
+        $receiver->reject($envelope);
+
+        return $envelope->getMessage()::class;
+    }
+
+    /**
+     * Sends every failed message back to the transport it failed on, as is.
+     *
+     * @return array{sent: int, kept: int} the messages sent back, and the ones kept as they do not tell
+     *                                     which transport they failed on
+     */
+    public function resendAll(string $failureTransport): array
+    {
+        $receiver = $this->receiver($failureTransport);
+        $sent = 0;
+        $kept = 0;
+        foreach (self::envelopes($receiver) as $envelope) {
+            $sender = $this->sender($envelope);
+            if (null === $sender) {
+                ++$kept;
+
+                continue;
+            }
+
+            $sender->send(new Envelope($envelope->getMessage(), self::stamps($envelope)));
+            $receiver->reject($envelope);
+            ++$sent;
+        }
+
+        return ['sent' => $sent, 'kept' => $kept];
+    }
+
+    /**
+     * Removes every failed message for good.
+     *
+     * @return int the messages removed
+     */
+    public function removeAll(string $failureTransport): int
+    {
+        $receiver = $this->receiver($failureTransport);
+        $removed = 0;
+        foreach (self::envelopes($receiver) as $envelope) {
+            $receiver->reject($envelope);
+            ++$removed;
+        }
+
+        return $removed;
     }
 
     /**
@@ -95,8 +181,8 @@ final readonly class FailedMessages
             ));
         }
 
-        $sender = $this->transports->has($transport) ? $this->transports->get($transport) : null;
-        if (!$sender instanceof SenderInterface) {
+        $sender = $this->sender($envelope);
+        if (null === $sender) {
             throw new FailedMessageException(sprintf('Messages cannot be sent to "%s".', $transport));
         }
 
@@ -107,6 +193,32 @@ final readonly class FailedMessages
         $receiver->reject($envelope);
 
         return $transport;
+    }
+
+    /**
+     * The transport the message failed on, when it can send messages.
+     */
+    private function sender(Envelope $envelope): ?SenderInterface
+    {
+        $transport = $envelope->last(SentToFailureTransportStamp::class)?->getOriginalReceiverName();
+        $sender = null !== $transport && $this->transports->has($transport) ? $this->transports->get($transport) : null;
+
+        return $sender instanceof SenderInterface ? $sender : null;
+    }
+
+    /**
+     * Every message of the transport, read before any of them is removed.
+     *
+     * @return list<Envelope>
+     */
+    private static function envelopes(ListableReceiverInterface $receiver): array
+    {
+        $envelopes = [];
+        foreach ($receiver->all() as $envelope) {
+            $envelopes[] = $envelope;
+        }
+
+        return $envelopes;
     }
 
     private function receiver(string $transport): ListableReceiverInterface

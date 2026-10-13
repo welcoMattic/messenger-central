@@ -58,6 +58,72 @@ final class FailedMessagesTest extends TestCase
         static::assertNull($this->failedMessages->get('failed', '404'));
     }
 
+    public function testItTellsEveryErrorOfAFailedMessage(): void
+    {
+        // Given
+        $envelope = $this->failed->send(new Envelope(new RoutedByClass('hello'), [
+            new SentToFailureTransportStamp('async'),
+            new RedeliveryStamp(1),
+            new RedeliveryStamp(2),
+            new ErrorDetailsStamp(RuntimeException::class, 0, 'SMTP down'),
+            ErrorDetailsStamp::create(new RuntimeException("SMTP still down,\nafter a retry")),
+            new RedeliveryStamp(0),
+        ]));
+
+        // When
+        $message = $this->failedMessages->get(
+            'failed',
+            (string) $envelope->last(TransportMessageIdStamp::class)?->getId(),
+        );
+
+        // Then
+        static::assertNotNull($message);
+        static::assertSame(
+            ['RuntimeException: SMTP down', "RuntimeException: SMTP still down,\nafter a retry"],
+            $message->errors,
+        );
+        static::assertSame(2, $message->retries);
+        static::assertStringContainsString(__FUNCTION__, (string) $message->trace);
+    }
+
+    public function testItRemovesFailedMessages(): void
+    {
+        // Given
+        $first = $this->addFailed(new RoutedByClass('first'));
+        $this->addFailed(new RoutedByClass('second'));
+
+        // When
+        $class = $this->failedMessages->remove('failed', $first);
+
+        // Then
+        static::assertSame(RoutedByClass::class, $class);
+        static::assertCount(1, $this->failed->envelopes);
+        static::assertSame([], $this->async->envelopes);
+
+        // When
+        $removed = $this->failedMessages->removeAll('failed');
+
+        // Then
+        static::assertSame(1, $removed);
+        static::assertSame([], $this->failed->envelopes);
+    }
+
+    public function testItSendsEveryFailedMessageBack(): void
+    {
+        // Given
+        $this->addFailed(new RoutedByClass('first'));
+        $this->addFailed(new RoutedByClass('second'));
+        $this->failed->send(new Envelope(new RoutedByClass('nowhere')));
+
+        // When
+        $result = $this->failedMessages->resendAll('failed');
+
+        // Then
+        static::assertSame(['sent' => 2, 'kept' => 1], $result);
+        static::assertCount(2, $this->async->envelopes);
+        static::assertCount(1, $this->failed->envelopes, 'The message that does not tell its transport stays');
+    }
+
     public function testItSendsAMessageBackToTheTransportItFailedOn(): void
     {
         // Given

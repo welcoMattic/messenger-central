@@ -10,10 +10,15 @@ use Symfony\Component\Tui\Ansi\AnsiUtils;
 use Symfony\Component\Tui\Widget\Util\StringUtils;
 
 use function count;
+use function explode;
 use function floor;
 use function intdiv;
 use function max;
 use function mb_str_split;
+use function mb_strimwidth;
+use function mb_strlen;
+use function mb_strwidth;
+use function mb_substr;
 use function min;
 use function round;
 use function sprintf;
@@ -61,6 +66,44 @@ final class Format
     public static function safe(string $text): string
     {
         return StringUtils::stripControlBytes($text);
+    }
+
+    /**
+     * Wraps plain text at word boundaries, cutting the words longer than a line.
+     *
+     * @return list<string>
+     */
+    public static function wrap(string $text, int $width): array
+    {
+        $width = max(10, $width);
+        $lines = [];
+        foreach (explode("\n", $text) as $paragraph) {
+            $line = '';
+            foreach (explode(' ', $paragraph) as $word) {
+                $candidate = '' === $line ? $word : $line . ' ' . $word;
+                if (mb_strwidth($candidate) <= $width) {
+                    $line = $candidate;
+
+                    continue;
+                }
+
+                if ('' !== $line) {
+                    $lines[] = $line;
+                }
+
+                while (mb_strwidth($word) > $width) {
+                    $head = mb_strimwidth($word, 0, $width);
+                    $lines[] = $head;
+                    $word = mb_substr($word, mb_strlen($head));
+                }
+
+                $line = $word;
+            }
+
+            $lines[] = $line;
+        }
+
+        return $lines;
     }
 
     /**

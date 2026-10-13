@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Welcomattic\MessengerCentral\Tui;
 
+use Closure;
 use DateTimeZone;
 use Revolt\EventLoop;
 use Revolt\EventLoop\UnsupportedFeatureException;
@@ -40,6 +41,8 @@ use Welcomattic\MessengerCentral\Worker\WorkerProcess;
 use Welcomattic\MessengerCentral\Worker\WorkerStatus;
 use Welcomattic\MessengerCentral\Worker\WorkerSupervisor;
 
+use function array_slice;
+use function array_values;
 use function bin2hex;
 use function constant;
 use function count;
@@ -87,6 +90,7 @@ final class Dashboard
     private readonly Keybindings $keybindings;
     private readonly Keybindings $promptKeybindings;
     private readonly Keybindings $editorKeybindings;
+    private readonly Keybindings $confirmKeybindings;
     private readonly float $startedAt;
     private readonly bool $parallel;
     private readonly int $defaultConcurrency;
@@ -130,6 +134,15 @@ final class Dashboard
     /** @var array{transport: string, value: string}|null the concurrency being typed */
     private ?array $prompt = null;
 
+    /** @var array{question: string, action: Closure(): void}|null an action waiting to be confirmed */
+    private ?array $confirmation = null;
+
+    /** @var array<string, int> the page of failed messages shown, per failure transport, from 0 */
+    private array $failedPages = [];
+
+    // Whether the selected failed message shows its errors instead of its properties
+    private bool $showErrors = false;
+
     /**
      * @param int       $concurrency default number of messages a worker handles at the same time
      * @param bool|null $parallel    whether "--concurrency" is supported, detected when null
@@ -161,6 +174,12 @@ final class Dashboard
             'options' => ['o'],
             'collapse' => [Key::LEFT],
             'resend' => ['r'],
+            'remove' => ['d', Key::DELETE],
+            'resend_all' => ['shift+r'],
+            'remove_all' => ['shift+d'],
+            'next_page' => [']', Key::PAGE_DOWN],
+            'previous_page' => ['[', Key::PAGE_UP],
+            'errors' => ['e'],
         ]);
         $this->promptKeybindings = new Keybindings([
             'submit' => [Key::ENTER],
@@ -170,6 +189,10 @@ final class Dashboard
         $this->editorKeybindings = new Keybindings([
             'send' => ['ctrl+s'],
             'cancel' => [Key::ESCAPE, 'ctrl+c'],
+        ]);
+        $this->confirmKeybindings = new Keybindings([
+            'yes' => ['y'],
+            'no' => ['n', Key::ESCAPE, 'ctrl+c'],
         ]);
 
         if ($concurrency > 1 && !$this->parallel) {
@@ -279,7 +302,7 @@ final class Dashboard
         if (null !== $this->selected && ($now - $this->selectedQueueAt) >= self::SELECTED_QUEUE_INTERVAL) {
             $this->selectedQueueAt = $now;
             $limit = $this->catalog->get($this->selected)->failureTransport
-                ? self::FAILED_LIST_LIMIT
+                ? $this->failedLimit($this->selected)
                 : self::QUEUE_PEEK_LIMIT;
             $this->inspect($this->selected, $limit, $now);
         }
@@ -293,7 +316,7 @@ final class Dashboard
 
                 // The failed messages of an open failure transport are rows of the menu
                 $limit = $transport->failureTransport && $this->expanded === $transport->name
-                    ? self::FAILED_LIST_LIMIT
+                    ? $this->failedLimit($transport->name)
                     : 0;
                 $this->inspect($transport->name, $limit, $now);
             }
@@ -371,6 +394,16 @@ final class Dashboard
             return;
         }
 
+        $confirmation = $this->confirmation;
+        if (null !== $confirmation) {
+            // Other keys are ignored, so that a confirmation is not lost by mistake
+            $event->stopPropagation();
+            $this->onConfirmationInput($data, $confirmation['action']);
+            $this->refresh();
+
+            return;
+        }
+
         if (null !== $this->prompt) {
             // The prompt takes every key, so that the menu does not move while typing
             $event->stopPropagation();
@@ -416,10 +449,33 @@ final class Dashboard
             'messages' => $this->show($transport, self::VIEW_MESSAGES),
             'options' => $this->show($transport, self::VIEW_OPTIONS),
             'resend' => $this->resendAsIs($transport),
+            'remove' => $this->confirmRemove($transport),
+            'resend_all' => $this->confirmResendAll($transport),
+            'remove_all' => $this->confirmRemoveAll($transport),
+            'next_page' => $this->changePage($transport, 1),
+            'previous_page' => $this->changePage($transport, -1),
+            'errors' => $this->toggleErrors(),
             default => $this->collapse(),
         };
 
         $this->refresh();
+    }
+
+    /**
+     * @param Closure(): void $action
+     */
+    private function onConfirmationInput(string $data, Closure $action): void
+    {
+        if ($this->confirmKeybindings->matches($data, 'no')) {
+            $this->confirmation = null;
+
+            return;
+        }
+
+        if ($this->confirmKeybindings->matches($data, 'yes')) {
+            $this->confirmation = null;
+            $action();
+        }
     }
 
     /**
@@ -495,6 +551,173 @@ final class Dashboard
         }
     }
 
+    private function toggleErrors(): void
+    {
+        $this->showErrors = null !== $this->selectedMessage && !$this->showErrors;
+    }
+
+    /**
+     * @param Closure(): void $action
+     */
+    private function confirm(string $question, Closure $action): void
+    {
+        $this->confirmation = ['question' => $question, 'action' => $action];
+    }
+
+    private function confirmRemove(string $transport): void
+    {
+        $id = $this->selectedMessage;
+        if (null === $id) {
+            return;
+        }
+
+        $this->loadFailedMessage($transport, $id);
+        $class = Format::shortClass($this->failedMessage['message']->class ?? '?');
+        $this->confirm(sprintf('Remove %s #%s for good?', $class, $id), function () use (
+            $transport,
+            $id,
+            $class,
+        ): void {
+            try {
+                $this->failedMessages->remove($transport, $id);
+            } catch (Throwable $error) {
+                $this->notify($error->getMessage());
+
+                return;
+            }
+
+            $this->forgetFailedMessage($transport);
+            $this->notify(sprintf('Removed %s #%s.', $class, $id));
+        });
+    }
+
+    private function confirmResendAll(string $transport): void
+    {
+        if (!$this->catalog->get($transport)->failureTransport) {
+            return;
+        }
+
+        $this->confirm(
+            sprintf(
+                'Send %s of "%s" back to the transports they failed on?',
+                $this->failedCount($transport),
+                $transport,
+            ),
+            function () use ($transport): void {
+                try {
+                    $result = $this->failedMessages->resendAll($transport);
+                } catch (Throwable $error) {
+                    $this->notify($error->getMessage());
+
+                    return;
+                }
+
+                $this->forgetFailedMessage($transport);
+                $this->notify(sprintf(
+                    'Sent %d message%s back%s.',
+                    $result['sent'],
+                    1 === $result['sent'] ? '' : 's',
+                    $result['kept'] > 0
+                        ? sprintf(', kept %d that do not tell which transport they failed on', $result['kept'])
+                        : '',
+                ));
+            },
+        );
+    }
+
+    private function confirmRemoveAll(string $transport): void
+    {
+        if (!$this->catalog->get($transport)->failureTransport) {
+            return;
+        }
+
+        $this->confirm(
+            sprintf('Remove %s of "%s" for good?', $this->failedCount($transport), $transport),
+            function () use ($transport): void {
+                try {
+                    $removed = $this->failedMessages->removeAll($transport);
+                } catch (Throwable $error) {
+                    $this->notify($error->getMessage());
+
+                    return;
+                }
+
+                $this->forgetFailedMessage($transport);
+                $this->notify(sprintf('Removed %d message%s.', $removed, 1 === $removed ? '' : 's'));
+            },
+        );
+    }
+
+    /**
+     * "the 12 failed messages", as far as the transport tells.
+     */
+    private function failedCount(string $transport): string
+    {
+        $count = $this->queues[$transport]->count ?? null;
+
+        return match ($count) {
+            null => 'all the failed messages',
+            1 => 'the failed message',
+            default => sprintf('the %d failed messages', $count),
+        };
+    }
+
+    /**
+     * Goes back to the transport row once its messages changed, and asks for them again.
+     */
+    private function forgetFailedMessage(string $transport): void
+    {
+        $this->failedMessage = null;
+        $this->selectedMessage = null;
+        $this->showErrors = false;
+        $this->menu->moveTo('transport:' . $transport);
+        $this->selectedQueueAt = 0.0;
+        $this->otherQueuesAt = 0.0;
+    }
+
+    private function changePage(string $transport, int $delta): void
+    {
+        if (!$this->catalog->get($transport)->failureTransport) {
+            return;
+        }
+
+        $count = $this->queues[$transport]->count ?? null;
+        $last = null === $count ? 0 : max(0, intdiv($count - 1, self::FAILED_LIST_LIMIT));
+        $page = max(0, min($last, $this->failedPage($transport) + $delta));
+        if ($page === $this->failedPage($transport)) {
+            return;
+        }
+
+        $this->failedPages[$transport] = $page;
+        $this->selectedQueueAt = 0.0;
+        $this->otherQueuesAt = 0.0;
+    }
+
+    private function failedPage(string $transport): int
+    {
+        return $this->failedPages[$transport] ?? 0;
+    }
+
+    /**
+     * Messages are listed from the first one: the receivers cannot skip some.
+     */
+    private function failedLimit(string $transport): int
+    {
+        return ($this->failedPage($transport) + 1) * self::FAILED_LIST_LIMIT;
+    }
+
+    /**
+     * @return list<array{class: string, id: string|null, from: string|null, failed_at: float|null, error: string|null}>
+     */
+    private function failedPageMessages(string $transport): array
+    {
+        return array_values(array_slice(
+            $this->queues[$transport]->messages ?? [],
+            $this->failedPage($transport) * self::FAILED_LIST_LIMIT,
+            self::FAILED_LIST_LIMIT,
+        ));
+    }
+
     /**
      * @param string|null $json the edited properties, null to send the message as is
      *
@@ -510,11 +733,7 @@ final class Dashboard
             return Format::shortClass($error::class) . ': ' . $error->getMessage();
         }
 
-        $this->failedMessage = null;
-        $this->selectedMessage = null;
-        $this->menu->moveTo('transport:' . $transport);
-        $this->selectedQueueAt = 0.0;
-        $this->otherQueuesAt = 0.0;
+        $this->forgetFailedMessage($transport);
         $this->notify(sprintf('Sent %s #%s back to "%s".', Format::shortClass($class), $id, $to));
 
         return null;
@@ -524,6 +743,7 @@ final class Dashboard
     {
         $this->selected = self::transportOf($key) ?? $this->selected;
         $this->selectedMessage = self::messageOf($key);
+        $this->showErrors = false;
         if (null !== $this->selected && null !== $this->selectedMessage) {
             $this->loadFailedMessage($this->selected, $this->selectedMessage);
         }
@@ -809,7 +1029,7 @@ final class Dashboard
             }
 
             if ($transport->failureTransport) {
-                foreach ($this->queues[$name]->messages ?? [] as $message) {
+                foreach ($this->failedPageMessages($name) as $message) {
                     if (null === $message['id']) {
                         continue;
                     }
@@ -915,6 +1135,8 @@ final class Dashboard
                 $failedMessage['error'],
                 $this->now(),
                 $this->timezone,
+                $this->showErrors,
+                $columns,
             );
         }
 
@@ -924,6 +1146,8 @@ final class Dashboard
                 $this->queues[$selected] ?? null,
                 $this->now(),
                 $this->timezone,
+                $this->failedPage($selected),
+                self::FAILED_LIST_LIMIT,
             );
         }
 
@@ -977,6 +1201,17 @@ final class Dashboard
             return $lines;
         }
 
+        $confirmation = $this->confirmation;
+        if (null !== $confirmation) {
+            $lines[] = sprintf(
+                ' %s   %s',
+                Format::bold(Format::color(Format::safe($confirmation['question']), 'yellow')),
+                Format::dim('y yes  n no'),
+            );
+
+            return $lines;
+        }
+
         $prompt = $this->prompt;
         if (null !== $prompt) {
             $lines[] = sprintf(
@@ -999,8 +1234,9 @@ final class Dashboard
         }
 
         $lines[] = Format::dim(match (true) {
-            null !== $this->selectedMessage => ' ↑↓ move  ⏎ edit and send back  r send back as is  q quit',
-            $failureTransport => ' ↑↓ move  ⏎ open  a failed messages  m messages  o options  q quit',
+            null !== $this->selectedMessage
+                => ' ↑↓ move  ⏎ edit and send back  r send back as is  d remove  e errors  [ ] pages  q quit',
+            $failureTransport => ' ↑↓ move  ⏎ open  [ ] pages  R send all back  D remove all  o options  q quit',
             default => ' ↑↓ move  ⏎ open  s start/stop  +/- scale'
                 . ($this->parallel ? '  c concurrency' : '')
                 . '  a activity  m messages  o options  q quit',

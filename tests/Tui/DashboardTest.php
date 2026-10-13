@@ -371,6 +371,153 @@ final class DashboardTest extends TestCase
         static::assertSame('failed', $this->dashboard->selected());
     }
 
+    public function testItRemovesAFailedMessageOnceConfirmed(): void
+    {
+        // Given
+        $failed = new ListableTransport();
+        $failed->send(new Envelope(new RoutedByClass(), [new SentToFailureTransportStamp('async')]));
+        $this->openFailureTransport($failed);
+        $this->dashboard->input("\e[B");
+
+        // When
+        $this->dashboard->input('d');
+        $screen = $this->tick();
+
+        // Then
+        static::assertStringContainsString('Remove RoutedByClass #1 for good?   y yes  n no', $screen);
+
+        // When
+        $this->dashboard->input('n');
+        $screen = $this->tick();
+
+        // Then
+        static::assertCount(1, $failed->envelopes);
+        static::assertStringNotContainsString('for good?', $screen);
+
+        // When: other keys do not answer
+        $this->dashboard->input('d');
+        $this->dashboard->input('q');
+        $this->dashboard->input('y');
+        $screen = $this->tick();
+
+        // Then
+        static::assertSame([], $failed->envelopes);
+        static::assertStringContainsString('Removed RoutedByClass #1.', $screen);
+        static::assertSame('failed', $this->dashboard->selected());
+    }
+
+    public function testItSendsEveryFailedMessageBackOnceConfirmed(): void
+    {
+        // Given
+        $async = new ListableTransport();
+        $failed = new ListableTransport();
+        foreach (['first', 'second'] as $payload) {
+            $failed->send(new Envelope(new RoutedByClass($payload), [new SentToFailureTransportStamp('async')]));
+        }
+
+        $this->openFailureTransport($failed, $async);
+
+        // When
+        $this->dashboard->input('R');
+        $screen = $this->tick();
+
+        // Then
+        static::assertStringContainsString(
+            'Send the 2 failed messages of "failed" back to the transports they failed on?',
+            $screen,
+        );
+
+        // When
+        $this->dashboard->input('y');
+        $screen = $this->tick();
+
+        // Then
+        static::assertCount(2, $async->envelopes);
+        static::assertSame([], $failed->envelopes);
+        static::assertStringContainsString('Sent 2 messages back.', $screen);
+    }
+
+    public function testItRemovesEveryFailedMessageOnceConfirmed(): void
+    {
+        // Given
+        $failed = new ListableTransport();
+        $failed->send(new Envelope(new RoutedByClass(), [new SentToFailureTransportStamp('async')]));
+        $this->openFailureTransport($failed);
+
+        // When
+        $this->dashboard->input('D');
+        $screen = $this->tick();
+        $this->dashboard->input('y');
+        $done = $this->tick();
+
+        // Then
+        static::assertStringContainsString('Remove the failed message of "failed" for good?', $screen);
+        static::assertSame([], $failed->envelopes);
+        static::assertStringContainsString('Removed 1 message.', $done);
+    }
+
+    public function testItPagesThroughFailedMessages(): void
+    {
+        // Given
+        $failed = new ListableTransport();
+        for ($i = 1; $i <= 25; ++$i) {
+            $failed->send(new Envelope(new RoutedByClass(), [new SentToFailureTransportStamp('async')]));
+        }
+
+        // When
+        $screen = $this->openFailureTransport($failed);
+
+        // Then
+        static::assertStringContainsString('Failed messages  25   page 1 of 2, [ and ] to turn', $screen);
+        static::assertStringContainsString('├ #20 RoutedByClass', $screen);
+        static::assertStringNotContainsString('├ #21 RoutedByClass', $screen);
+
+        // When
+        $this->dashboard->input(']');
+        $screen = $this->tick();
+
+        // Then
+        static::assertStringContainsString('page 2 of 2', $screen);
+        static::assertStringContainsString('├ #21 RoutedByClass', $screen);
+        static::assertStringNotContainsString('├ #20 RoutedByClass', $screen);
+
+        // When
+        $this->dashboard->input(']');
+        $this->dashboard->input('[');
+        $screen = $this->tick();
+
+        // Then
+        static::assertStringContainsString('page 1 of 2', $screen);
+    }
+
+    public function testItShowsTheErrorsOfAFailedMessage(): void
+    {
+        // Given
+        $failed = new ListableTransport();
+        $failed->send(new Envelope(new RoutedByClass(), [
+            new SentToFailureTransportStamp('async'),
+            ErrorDetailsStamp::create(new RuntimeException('Invalid payload')),
+        ]));
+        $this->openFailureTransport($failed);
+        $this->dashboard->input("\e[B");
+
+        // When
+        $this->dashboard->input('e');
+        $screen = $this->tick();
+
+        // Then
+        static::assertStringContainsString('RuntimeException: Invalid payload', $screen);
+        static::assertStringContainsString('Stack trace of the last error', $screen);
+        static::assertStringContainsString(__FUNCTION__, $screen);
+
+        // When
+        $this->dashboard->input('e');
+        $screen = $this->tick();
+
+        // Then
+        static::assertStringContainsString('"payload": ""', $screen);
+    }
+
     public function testItCancelsTheEditionOfAFailedMessage(): void
     {
         // Given
@@ -583,6 +730,27 @@ final class DashboardTest extends TestCase
         // Then
         static::assertSame([1, 1, 2, 2, 2, 2, 3], $calls, 'After 2, then 4 seconds');
         static::assertStringContainsString('Connection timed out', $this->tick());
+    }
+
+    /**
+     * Starts a dashboard on these transports, and opens the failure transport.
+     */
+    private function openFailureTransport(ListableTransport $failed, ?ListableTransport $async = null): string
+    {
+        $this->dashboard->stop();
+        $transports = new ServiceLocator([
+            'async' => static fn(): ListableTransport => $async ?? new ListableTransport(),
+            'failed' => static fn(): ListableTransport => $failed,
+        ]);
+        $this->dashboard = $this->dashboard(
+            inspector: new QueueInspector($transports),
+            failedMessages: new FailedMessages($transports),
+        );
+        $this->dashboard->input("\e[B");
+        $this->tick();
+        $this->dashboard->input("\r");
+
+        return $this->tick();
     }
 
     private function tick(): string

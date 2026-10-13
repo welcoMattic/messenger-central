@@ -9,7 +9,10 @@ use Welcomattic\MessengerCentral\Transport\QueueSnapshot;
 use Welcomattic\MessengerCentral\Transport\TransportDefinition;
 use Welcomattic\MessengerCentral\Tui\Format;
 
+use function array_slice;
+use function ceil;
 use function count;
+use function max;
 use function sprintf;
 
 /**
@@ -25,23 +28,30 @@ final class FailedMessagesView
         ?QueueSnapshot $queue,
         float $now,
         DateTimeZone $timezone,
+        int $page = 0,
+        int $pageSize = 20,
     ): array {
         return [
             Format::bold(Format::safe($transport->name)) . '  ' . Format::color('[failure transport]', 'magenta'),
             Format::dim(Format::safe($transport->maskedDsn() ?? 'custom transport service')),
             '',
-            ...self::messages($queue, $now, $timezone),
+            ...self::messages($queue, $now, $timezone, $page, $pageSize),
             '',
             Format::dim('Workers do not consume a failure transport. Open it (⏎) and pick a message'),
-            Format::dim('to send it back to the transport it failed on, as is or edited.'),
+            Format::dim('to send it back to the transport it failed on, as is or edited, or to remove it.'),
         ];
     }
 
     /**
      * @return list<string>
      */
-    private static function messages(?QueueSnapshot $queue, float $now, DateTimeZone $timezone): array
-    {
+    private static function messages(
+        ?QueueSnapshot $queue,
+        float $now,
+        DateTimeZone $timezone,
+        int $page,
+        int $pageSize,
+    ): array {
         $title = Format::bold('Failed messages') . '  ';
         if (null === $queue) {
             return [$title . Format::dim('…')];
@@ -63,8 +73,22 @@ final class FailedMessagesView
             return [$title . Format::dim('none')];
         }
 
-        $lines = [$title . $count];
-        foreach ($queue->messages as $message) {
+        $pages = max(1, (int) ceil($count / $pageSize));
+        $first = $page * $pageSize;
+        $shown = array_slice($queue->messages, $first, $pageSize);
+        $lines = [
+            $title
+                . $count
+                . ($pages > 1 ? Format::dim(sprintf('   page %d of %d, [ and ] to turn', $page + 1, $pages)) : ''),
+        ];
+        if ([] === $shown) {
+            // The page was just turned
+            $lines[] = Format::dim('  …');
+
+            return $lines;
+        }
+
+        foreach ($shown as $message) {
             $lines[] = sprintf(
                 '  %s  %s%s%s%s',
                 Format::dim(
@@ -77,7 +101,7 @@ final class FailedMessagesView
             );
         }
 
-        $hidden = $count - count($queue->messages);
+        $hidden = $count - $first - count($shown);
         if ($hidden > 0) {
             $lines[] = Format::dim(sprintf('  … and %d more', $hidden));
         }

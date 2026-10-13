@@ -165,11 +165,18 @@ after their current messages.
 ### Failed messages
 
 Workers cannot be started on a failure transport. Open it instead: its failed
-messages (the first 20) are listed under it, with the transport they failed on
-and their last error. Press `r` on one to send it back as is to the transport
-it failed on, which removes it from the failure transport. Press `⏎` to edit it
-first: its properties show up as a JSON document, `Ctrl+S` sends the message
-back with your changes, `Esc` cancels.
+messages are listed under it, 20 per page (`[` and `]` turn the pages), with the
+transport they failed on and their last error. On a message:
+
+- `r` sends it back as is to the transport it failed on, which removes it from
+  the failure transport;
+- `⏎` edits it first: its properties show up as a JSON document, `Ctrl+S` sends
+  the message back with your changes, `Esc` cancels;
+- `d` removes it for good;
+- `e` shows its errors in full, with the stack trace of the last one.
+
+On the failure transport, `R` sends every failed message back, and `D` removes
+them all. Removing and sending everything back ask for a confirmation.
 
 ```json
 {
