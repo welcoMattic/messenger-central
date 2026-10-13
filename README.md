@@ -6,6 +6,8 @@ scale their workers, and watch messages flow in real time.
 
 Built on top of the [Symfony TUI component](https://symfony.com/doc/current/tui.html).
 
+If it saves you time, [sponsor my open source work](https://github.com/sponsors/welcoMattic).
+
 ```
  Messenger Central  ·  9 transports  ·  8 workers running
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -150,6 +152,20 @@ messenger_central:
 composer install
 composer qa   # mago fmt --dry-run, mago lint, mago analyze, phpunit
 ```
+
+## Sponsors
+
+Messenger Central is free and open source. Sponsoring funds my open source
+work, with a goal of two full working days per month on Symfony:
+[become a sponsor](https://github.com/sponsors/welcoMattic).
+
+Companies at the
+[Company tier](https://github.com/sponsors/welcoMattic/sponsorships?tier_id=662811)
+($100 a month) or above get their logo and a link here. Sponsors at the
+[Developer tier](https://github.com/sponsors/welcoMattic/sponsorships?tier_id=662810)
+($25 a month) or above are listed in [SPONSORS.md](SPONSORS.md).
+
+<!-- Logos of the Company tier sponsors and above, linked with rel="sponsored" -->
 
 ## License
 
