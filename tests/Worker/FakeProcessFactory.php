@@ -11,16 +11,20 @@ use const PHP_BINARY;
 
 final class FakeProcessFactory implements ProcessFactory
 {
-    /** @var list<array{string, int}> */
+    /** @var list<array{string, int, int}> transport, worker id and concurrency of each worker */
     public array $created = [];
 
+    /**
+     * @param string $mode see tests/Fixtures/fake-worker.php
+     */
     public function __construct(
         private readonly int $messages = 3,
+        public string $mode = 'default',
     ) {}
 
-    public function create(string $transport, int $workerId): Process
+    public function create(string $transport, int $workerId, int $concurrency = 1): Process
     {
-        $this->created[] = [$transport, $workerId];
+        $this->created[] = [$transport, $workerId, $concurrency];
 
         return new Process([
             PHP_BINARY,
@@ -28,6 +32,7 @@ final class FakeProcessFactory implements ProcessFactory
             $transport,
             (string) $workerId,
             (string) $this->messages,
+            $this->mode,
         ]);
     }
 }

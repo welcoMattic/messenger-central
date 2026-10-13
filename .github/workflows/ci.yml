@@ -63,3 +63,31 @@ jobs:
 
       - name: Run PHPUnit
         run: vendor/bin/phpunit
+
+  symfony-next:
+    name: Tests (Symfony 8.2, in development)
+    runs-on: ubuntu-latest
+    # Symfony 8.2 is not released yet: its changes must not block the build
+    continue-on-error: true
+    env:
+      SYMFONY_REQUIRE: '8.2.*'
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pcntl
+          coverage: none
+          tools: composer:v2, flex
+
+      - name: Allow development versions
+        run: |
+          composer config minimum-stability dev
+          composer config prefer-stable true
+
+      - name: Install dependencies
+        run: composer update --no-interaction --no-progress
+
+      - name: Run PHPUnit
+        run: vendor/bin/phpunit

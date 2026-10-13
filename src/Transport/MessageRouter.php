@@ -12,10 +12,12 @@ use Symfony\Component\Messenger\Transport\Sender\SenderInterface;
 use Symfony\Component\Messenger\Transport\Sender\SendersLocator;
 
 use function array_keys;
+use function array_map;
 use function array_values;
 use function class_exists;
 use function str_starts_with;
 use function strlen;
+use function strval;
 use function substr;
 
 /**
@@ -76,10 +78,12 @@ final readonly class MessageRouter
 
         $senders = [];
         foreach ($this->sendersLocator->getSenders(new Envelope($message)) as $alias => $_) {
-            $senders[self::toTransportName($alias)] = true;
+            // A transport named "123" in YAML has an integer alias, whatever the declared type
+            // @mago-expect analysis:redundant-cast
+            $senders[self::toTransportName((string) $alias)] = true;
         }
 
-        return array_keys($senders);
+        return array_map(strval(...), array_keys($senders));
     }
 
     /**

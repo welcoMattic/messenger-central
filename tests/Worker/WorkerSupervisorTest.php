@@ -11,7 +11,9 @@ use Welcomattic\MessengerCentral\Worker\WorkerProcess;
 use Welcomattic\MessengerCentral\Worker\WorkerStatus;
 use Welcomattic\MessengerCentral\Worker\WorkerSupervisor;
 
+use function array_column;
 use function array_map;
+use function array_slice;
 use function in_array;
 use function microtime;
 use function usleep;
@@ -46,7 +48,7 @@ final class WorkerSupervisorTest extends TestCase
         );
 
         // Then
-        static::assertSame([['async', 1], ['async', 2]], $this->factory->created);
+        static::assertSame([['async', 1, 1], ['async', 2, 1]], $this->factory->created);
 
         $activity = $this->supervisor->activity('async');
         static::assertSame(4, $activity->processed);
@@ -59,7 +61,7 @@ final class WorkerSupervisorTest extends TestCase
         static::assertSame(2, $worker->processed);
         static::assertSame(1, $worker->failed);
         static::assertSame(2 * 1024 * 1024, $worker->memory);
-        static::assertNull($worker->current);
+        static::assertSame([], $worker->inFlight);
         static::assertContains('[OK] Consuming messages from transport "async".', $worker->output);
         static::assertContains('a log line', $worker->output, 'The error output is kept too');
     }
@@ -103,6 +105,87 @@ final class WorkerSupervisorTest extends TestCase
         // Then
         static::assertFalse($this->supervisor->hasRunning());
         static::assertSame(WorkerStatus::Exited, $this->supervisor->workers('high')[0]->status);
+    }
+
+    public function testItReplacesWorkersWhenTheConcurrencyChanges(): void
+    {
+        // Given
+        $this->supervisor->scale('async', 2);
+        $this->waitUntil(fn(): bool => $this->allIdle('async'));
+
+        // When
+        $this->supervisor->scale('async', 2, 4);
+
+        // Then
+        static::assertSame([['async', 3, 4], ['async', 4, 4]], array_slice($this->factory->created, 2));
+        static::assertSame(
+            [4, 4],
+            array_map(
+                static fn(WorkerProcess $worker): int => $worker->concurrency,
+                $this->supervisor->active('async'),
+            ),
+        );
+        $this->waitUntil(fn(): bool => 2 === $this->alive('async'));
+    }
+
+    public function testItTracksMessagesHandledAtTheSameTime(): void
+    {
+        // Given
+        $this->factory->mode = 'interleaved';
+
+        // When
+        $this->supervisor->scale('async', 1, 3);
+        $this->waitUntil(fn(): bool => 3 === $this->supervisor->activity('async')->received);
+
+        // Then
+        $worker = $this->supervisor->workers('async')[0];
+        static::assertSame(WorkerStatus::Busy, $worker->status);
+        static::assertSame(['1', '2', '3'], array_column($worker->inFlight, 'id'));
+
+        // When
+        $this->supervisor->stop('async');
+        $this->waitUntil(fn(): bool => !$this->supervisor->hasRunning());
+
+        // Then
+        static::assertSame(3, $worker->processed);
+        static::assertSame(
+            '1',
+            $this->supervisor->activity('async')->recent[0]['id'],
+            'The oldest message is handled last',
+        );
+    }
+
+    public function testAWorkerStoppedWhileBootingIsNotShownAsCrashed(): void
+    {
+        // Given
+        $this->factory->mode = 'slow-boot';
+        $this->supervisor->scale('async', 1);
+
+        // When
+        $this->supervisor->stop('async');
+        $this->waitUntil(fn(): bool => !$this->supervisor->hasRunning());
+
+        // Then
+        $worker = $this->supervisor->workers('async')[0];
+        static::assertSame(143, $worker->exitCode);
+        static::assertTrue($worker->exitedCleanly());
+    }
+
+    public function testStopAllKillsTheWorkersThatDoNotStopInTime(): void
+    {
+        // Given
+        $this->factory->mode = 'stubborn';
+        $this->supervisor->scale('async', 1);
+        $this->waitUntil(fn(): bool => $this->allIdle('async'));
+
+        // When
+        $startedAt = microtime(true);
+        $this->supervisor->stopAll(0.5);
+
+        // Then
+        static::assertFalse($this->supervisor->hasRunning());
+        static::assertGreaterThanOrEqual(0.5, microtime(true) - $startedAt, 'It waited for the worker');
+        static::assertTrue($this->supervisor->workers('async')[0]->exitedCleanly(), 'It was asked to stop');
     }
 
     private function allIdle(string $transport): bool

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Welcomattic\MessengerCentral\Tui\View;
 
 use Welcomattic\MessengerCentral\Transport\TransportDefinition;
+use Welcomattic\MessengerCentral\Tui\Dashboard;
 use Welcomattic\MessengerCentral\Tui\Format;
 
 use function implode;
@@ -27,19 +28,44 @@ final class OptionsView
     private const int LABEL_WIDTH = 20;
 
     /**
+     * @param int  $concurrency messages handled at the same time by each worker
+     * @param bool $parallel    whether workers can handle several messages at the same time
+     *
      * @return list<string>
      */
-    public static function render(TransportDefinition $transport): array
+    public static function render(TransportDefinition $transport, int $concurrency = 1, bool $parallel = false): array
     {
         $lines = [
             Format::bold(sprintf('Configuration of %s', Format::safe($transport->name))),
             '',
             self::row('DSN', $transport->maskedDsn() ?? 'custom transport service'),
             self::row('Consumable', $transport->consumable ? 'yes' : 'no'),
+        ];
+
+        if ($transport->consumable) {
+            $lines[] = self::row(
+                'Concurrency',
+                $parallel
+                    ? sprintf('%d message%s at a time per worker', $concurrency, 1 === $concurrency ? '' : 's')
+                    : sprintf('1 message at a time, more needs %s', Dashboard::PARALLEL_REQUIREMENTS),
+            );
+        }
+
+        // Symfony 8.2 consumes the transports with the highest priority first
+        if (null !== $transport->priority && 0 !== $transport->priority) {
+            $lines[] = self::row('Priority', (string) $transport->priority);
+        }
+
+        $serializer = $transport->serializer ?? 'default';
+        $serializer .= $transport->signed ? ', signed' : '';
+        $serializer .= $transport->claimCheck ? ', claim check' : '';
+
+        $lines = [
+            ...$lines,
             self::row('Failure transport', $transport->failureTransportName ?? 'none'),
             self::row('Used for failures', $transport->failureTransport ? 'yes' : 'no'),
             self::row('Retry strategy', self::retry($transport->retryStrategy)),
-            self::row('Serializer', $transport->serializer ?? 'default'),
+            self::row('Serializer', $serializer),
             '',
             Format::bold('Options'),
         ];

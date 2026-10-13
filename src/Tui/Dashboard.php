@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace Welcomattic\MessengerCentral\Tui;
 
-use Closure;
+use DateTimeZone;
 use Revolt\EventLoop;
 use Revolt\EventLoop\UnsupportedFeatureException;
+use Symfony\Component\Clock\ClockInterface;
+use Symfony\Component\Clock\NativeClock;
 use Symfony\Component\Tui\Event\InputEvent;
 use Symfony\Component\Tui\Input\Key;
 use Symfony\Component\Tui\Input\Keybindings;
@@ -17,28 +19,41 @@ use Symfony\Component\Tui\Style\Style;
 use Symfony\Component\Tui\Terminal\TerminalInterface;
 use Symfony\Component\Tui\Tui;
 use Symfony\Component\Tui\Widget\ContainerWidget;
+use Symfony\Component\Tui\Widget\EditorWidget;
+use Throwable;
+use Welcomattic\MessengerCentral\Failure\FailedMessage;
+use Welcomattic\MessengerCentral\Failure\FailedMessageException;
+use Welcomattic\MessengerCentral\Failure\FailedMessages;
 use Welcomattic\MessengerCentral\Transport\QueueInspector;
 use Welcomattic\MessengerCentral\Transport\QueueSnapshot;
 use Welcomattic\MessengerCentral\Transport\TransportCatalog;
 use Welcomattic\MessengerCentral\Transport\TransportDefinition;
 use Welcomattic\MessengerCentral\Tui\View\ActivityView;
+use Welcomattic\MessengerCentral\Tui\View\FailedMessagesView;
+use Welcomattic\MessengerCentral\Tui\View\FailedMessageView;
 use Welcomattic\MessengerCentral\Tui\View\MessagesView;
 use Welcomattic\MessengerCentral\Tui\View\OptionsView;
 use Welcomattic\MessengerCentral\Tui\Widget\CanvasWidget;
 use Welcomattic\MessengerCentral\Tui\Widget\MenuWidget;
+use Welcomattic\MessengerCentral\Worker\ParallelExecution;
 use Welcomattic\MessengerCentral\Worker\WorkerProcess;
 use Welcomattic\MessengerCentral\Worker\WorkerStatus;
 use Welcomattic\MessengerCentral\Worker\WorkerSupervisor;
 
-use function array_key_first;
+use function bin2hex;
 use function constant;
 use function count;
+use function ctype_digit;
 use function defined;
 use function explode;
+use function hex2bin;
+use function intdiv;
 use function max;
-use function microtime;
+use function min;
+use function preg_replace;
 use function sprintf;
-use function str_repeat;
+use function strlen;
+use function substr;
 
 /**
  * The terminal UI: transports on the left, the selected one on the right.
@@ -49,26 +64,45 @@ final class Dashboard
     public const string VIEW_MESSAGES = 'messages';
     public const string VIEW_OPTIONS = 'options';
 
+    public const string PARALLEL_REQUIREMENTS = 'Symfony 8.2 and amphp/parallel';
+
     private const float TICK_INTERVAL = 0.1;
     private const float SELECTED_QUEUE_INTERVAL = 1.0;
     private const float OTHER_QUEUES_INTERVAL = 3.0;
+    private const float MAX_QUEUE_BACKOFF = 30.0;
     private const int QUEUE_PEEK_LIMIT = 5;
-    private const int MAX_SCALE = 32;
+    private const int FAILED_LIST_LIMIT = 20;
     private const float NOTICE_SECONDS = 5.0;
+
+    // Workers × concurrency: each slot is a process that boots the application
+    private const int MAX_SLOTS = 32;
 
     private readonly Tui $tui;
     private readonly MenuWidget $menu;
     private readonly CanvasWidget $header;
     private readonly CanvasWidget $body;
     private readonly CanvasWidget $footer;
+    private readonly ContainerWidget $main;
+    private readonly EditorWidget $editor;
     private readonly Keybindings $keybindings;
-
-    /** @var Closure(): float */
-    private readonly Closure $clock;
-
+    private readonly Keybindings $promptKeybindings;
+    private readonly Keybindings $editorKeybindings;
     private readonly float $startedAt;
+    private readonly bool $parallel;
+    private readonly int $defaultConcurrency;
+    private readonly DateTimeZone $timezone;
+
     private ?string $selected;
     private ?string $expanded = null;
+
+    // The id of the failed message under the cursor
+    private ?string $selectedMessage = null;
+
+    /** @var array{transport: string, id: string, message: FailedMessage|null, error: string|null}|null */
+    private ?array $failedMessage = null;
+
+    /** @var array{transport: string, id: string, class: string, from: string, error: string|null}|null the failed message being edited */
+    private ?array $editing = null;
 
     /** @var array<string, string> */
     private array $views = [];
@@ -76,37 +110,71 @@ final class Dashboard
     /** @var array<string, int> */
     private array $scales = [];
 
+    /** @var array<string, int> */
+    private array $concurrencies = [];
+
     /** @var array<string, QueueSnapshot> */
     private array $queues = [];
+
+    /** @var array<string, int> transports that failed to tell their queue, with the number of failures in a row */
+    private array $queueFailures = [];
+
+    /** @var array<string, float> when to inspect again a transport that failed */
+    private array $queueRetryAt = [];
 
     private float $selectedQueueAt = 0.0;
     private float $otherQueuesAt = 0.0;
     private ?string $notice = null;
     private float $noticeAt = 0.0;
 
+    /** @var array{transport: string, value: string}|null the concurrency being typed */
+    private ?array $prompt = null;
+
     /**
-     * @param (Closure(): float)|null $clock
+     * @param int       $concurrency default number of messages a worker handles at the same time
+     * @param bool|null $parallel    whether "--concurrency" is supported, detected when null
      */
     public function __construct(
         private readonly TransportCatalog $catalog,
         private readonly WorkerSupervisor $supervisor,
         private readonly QueueInspector $inspector,
+        private readonly FailedMessages $failedMessages,
         TerminalInterface $terminal,
-        ?Closure $clock = null,
+        private readonly ClockInterface $clock = new NativeClock(),
+        int $concurrency = 1,
+        ?bool $parallel = null,
+        ?DateTimeZone $timezone = null,
     ) {
-        $this->clock = $clock ?? static fn(): float => microtime(true);
-        $this->startedAt = ($this->clock)();
-        $this->selected = array_key_first($catalog->all());
+        $this->startedAt = $this->now();
+        $this->parallel = $parallel ?? ParallelExecution::isAvailable();
+        $this->defaultConcurrency = $this->parallel ? max(1, min(self::MAX_SLOTS, $concurrency)) : 1;
+        $this->timezone = $timezone ?? LocalTimezone::detect();
+        $this->selected = ($catalog->all()[0] ?? null)?->name;
         $this->keybindings = new Keybindings([
             'quit' => ['q', 'ctrl+c'],
             'toggle' => ['s'],
             'scale_up' => ['+', '='],
             'scale_down' => ['-', '_'],
+            'concurrency' => ['c'],
             'activity' => ['a', Key::ESCAPE],
             'messages' => ['m'],
             'options' => ['o'],
             'collapse' => [Key::LEFT],
+            'resend' => ['r'],
         ]);
+        $this->promptKeybindings = new Keybindings([
+            'submit' => [Key::ENTER],
+            'cancel' => [Key::ESCAPE, 'ctrl+c'],
+            'erase' => [Key::BACKSPACE],
+        ]);
+        $this->editorKeybindings = new Keybindings([
+            'send' => ['ctrl+s'],
+            'cancel' => [Key::ESCAPE, 'ctrl+c'],
+        ]);
+
+        if ($concurrency > 1 && !$this->parallel) {
+            $this->notify(sprintf('The concurrency option is ignored: it needs %s.', self::PARALLEL_REQUIREMENTS));
+        }
 
         $this->tui = new Tui(terminal: $terminal);
         $this->menu = new MenuWidget()
@@ -121,15 +189,23 @@ final class Dashboard
         $this->body = new CanvasWidget($this->paintBody(...))->expandVertically(true);
         $this->body->setStyle(new Style(padding: new Padding(0, 0, 0, 1), flex: 3));
 
+        // Enter breaks lines in JSON documents: sending and cancelling are handled here
+        $this->editor = new EditorWidget(new Keybindings([
+            'new_line' => [Key::ENTER, 'shift+enter'],
+            'submit' => [],
+            'select_cancel' => [],
+        ]))->expandVertically(true);
+        $this->editor->setStyle(new Style(padding: new Padding(0, 0, 0, 1), flex: 3));
+
         $this->footer = new CanvasWidget($this->paintFooter(...));
 
-        $main = new ContainerWidget()->expandVertically(true);
-        $main->setStyle(new Style(direction: Direction::Horizontal));
-        $main->add($this->menu)->add($this->body);
+        $this->main = new ContainerWidget()->expandVertically(true);
+        $this->main->setStyle(new Style(direction: Direction::Horizontal));
+        $this->main->add($this->menu)->add($this->body);
 
         $this->header = new CanvasWidget($this->paintHeader(...));
 
-        $this->tui->add($this->header)->add($main)->add($this->footer);
+        $this->tui->add($this->header)->add($this->main)->add($this->footer);
         $this->tui->addListener($this->onInput(...));
         $this->tui->setFocus($this->menu);
         $this->refreshMenu();
@@ -197,26 +273,30 @@ final class Dashboard
      */
     public function tick(): void
     {
-        $now = ($this->clock)();
+        $now = $this->now();
         $changed = $this->supervisor->poll();
 
         if (null !== $this->selected && ($now - $this->selectedQueueAt) >= self::SELECTED_QUEUE_INTERVAL) {
             $this->selectedQueueAt = $now;
-            $this->queues[$this->selected] = $this->inspector->inspect($this->selected, self::QUEUE_PEEK_LIMIT);
-            $changed = true;
+            $limit = $this->catalog->get($this->selected)->failureTransport
+                ? self::FAILED_LIST_LIMIT
+                : self::QUEUE_PEEK_LIMIT;
+            $changed = $this->inspect($this->selected, $limit, $now) || $changed;
         }
 
         if (($now - $this->otherQueuesAt) >= self::OTHER_QUEUES_INTERVAL) {
             $this->otherQueuesAt = $now;
-            foreach ($this->catalog->all() as $name => $transport) {
-                if ($name === $this->selected || !$transport->consumable) {
+            foreach ($this->catalog->all() as $transport) {
+                if ($transport->name === $this->selected || !$transport->consumable) {
                     continue;
                 }
 
-                $this->queues[$name] = $this->inspector->inspect($name);
+                // The failed messages of an open failure transport are rows of the menu
+                $limit = $transport->failureTransport && $this->expanded === $transport->name
+                    ? self::FAILED_LIST_LIMIT
+                    : 0;
+                $changed = $this->inspect($transport->name, $limit, $now) || $changed;
             }
-
-            $changed = true;
         }
 
         if ($changed || $this->supervisor->hasRunning()) {
@@ -239,9 +319,65 @@ final class Dashboard
         return $this->scales[$transport] ?? 1;
     }
 
+    public function concurrency(string $transport): int
+    {
+        return $this->concurrencies[$transport] ?? $this->defaultConcurrency;
+    }
+
+    public function isEditing(): bool
+    {
+        return null !== $this->editing;
+    }
+
+    /**
+     * Inspects the queue of a transport, less and less often while it fails:
+     * an unreachable broker can block until its connection timeout.
+     *
+     * @return bool whether the queue was inspected
+     */
+    private function inspect(string $transport, int $limit, float $now): bool
+    {
+        if ($now < ($this->queueRetryAt[$transport] ?? 0.0)) {
+            return false;
+        }
+
+        $snapshot = $this->inspector->inspect($transport, $limit);
+        $this->queues[$transport] = $snapshot;
+        if (null === $snapshot->error) {
+            unset($this->queueFailures[$transport], $this->queueRetryAt[$transport]);
+
+            return true;
+        }
+
+        $failures = ($this->queueFailures[$transport] ?? 0) + 1;
+        $this->queueFailures[$transport] = $failures;
+        $this->queueRetryAt[$transport] = $now + min(self::MAX_QUEUE_BACKOFF, 2 ** $failures);
+
+        return true;
+    }
+
     private function onInput(InputEvent $event): void
     {
         $data = $event->getData();
+        $editing = $this->editing;
+        if (null !== $editing) {
+            // The editor takes every key, like the ones that move the focus
+            $event->stopPropagation();
+            $this->onEditorInput($data, $editing);
+            $this->refresh();
+
+            return;
+        }
+
+        if (null !== $this->prompt) {
+            // The prompt takes every key, so that the menu does not move while typing
+            $event->stopPropagation();
+            $this->onPromptInput($data, $this->prompt);
+            $this->refresh();
+
+            return;
+        }
+
         $action = null;
         foreach ($this->keybindings->all() as $name => $_) {
             if (!$this->keybindings->matches($data, $name)) {
@@ -273,33 +409,146 @@ final class Dashboard
             'toggle' => $this->toggleWorkers($transport),
             'scale_up' => $this->changeScale($transport, 1),
             'scale_down' => $this->changeScale($transport, -1),
+            'concurrency' => $this->openPrompt($transport),
             'activity' => $this->show($transport, self::VIEW_ACTIVITY),
             'messages' => $this->show($transport, self::VIEW_MESSAGES),
             'options' => $this->show($transport, self::VIEW_OPTIONS),
+            'resend' => $this->resendAsIs($transport),
             default => $this->collapse(),
         };
 
         $this->refresh();
     }
 
+    /**
+     * @param array{transport: string, value: string} $prompt
+     */
+    private function onPromptInput(string $data, array $prompt): void
+    {
+        if ($this->promptKeybindings->matches($data, 'cancel')) {
+            $this->prompt = null;
+
+            return;
+        }
+
+        if ($this->promptKeybindings->matches($data, 'submit')) {
+            $this->prompt = null;
+            $this->changeConcurrency($prompt['transport'], $prompt['value']);
+
+            return;
+        }
+
+        if ($this->promptKeybindings->matches($data, 'erase')) {
+            $this->prompt = ['transport' => $prompt['transport'], 'value' => substr($prompt['value'], 0, -1)];
+
+            return;
+        }
+
+        if (ctype_digit($data) && strlen($prompt['value'] . $data) <= 3) {
+            $this->prompt = ['transport' => $prompt['transport'], 'value' => $prompt['value'] . $data];
+        }
+    }
+
+    /**
+     * @param array{transport: string, id: string, class: string, from: string, error: string|null} $editing
+     */
+    private function onEditorInput(string $data, array $editing): void
+    {
+        if ($this->editorKeybindings->matches($data, 'cancel')) {
+            $this->closeEditor();
+
+            return;
+        }
+
+        if (!$this->editorKeybindings->matches($data, 'send')) {
+            $this->editor->handleInput($data);
+
+            return;
+        }
+
+        $error = $this->sendBack($editing['transport'], $editing['id'], $editing['class'], $this->editor->getText());
+        if (null !== $error) {
+            $this->editing = ['error' => $error] + $editing;
+
+            return;
+        }
+
+        $this->closeEditor();
+    }
+
+    /**
+     * Sends the failed message under the cursor back, without editing it.
+     */
+    private function resendAsIs(string $transport): void
+    {
+        $id = $this->selectedMessage;
+        if (null === $id) {
+            return;
+        }
+
+        $this->loadFailedMessage($transport, $id);
+        $error = $this->sendBack($transport, $id, $this->failedMessage['message']->class ?? '?', null);
+        if (null !== $error) {
+            $this->notify($error);
+        }
+    }
+
+    /**
+     * @param string|null $json the edited properties, null to send the message as is
+     *
+     * @return string|null why the message could not be sent back
+     */
+    private function sendBack(string $transport, string $id, string $class, ?string $json): ?string
+    {
+        try {
+            $to = $this->failedMessages->resend($transport, $id, $json);
+        } catch (FailedMessageException $error) {
+            return $error->getMessage();
+        } catch (Throwable $error) {
+            return Format::shortClass($error::class) . ': ' . $error->getMessage();
+        }
+
+        $this->failedMessage = null;
+        $this->selectedMessage = null;
+        $this->menu->moveTo('transport:' . $transport);
+        $this->selectedQueueAt = 0.0;
+        $this->otherQueuesAt = 0.0;
+        $this->notify(sprintf('Sent %s #%s back to "%s".', Format::shortClass($class), $id, $to));
+
+        return null;
+    }
+
     private function onMove(string $key): void
     {
-        $this->selected = explode(':', $key)[1] ?? $this->selected;
+        $this->selected = self::transportOf($key) ?? $this->selected;
+        $this->selectedMessage = self::messageOf($key);
+        if (null !== $this->selected && null !== $this->selectedMessage) {
+            $this->loadFailedMessage($this->selected, $this->selectedMessage);
+        }
+
         $this->selectedQueueAt = 0.0;
         $this->refresh();
     }
 
     private function onActivate(string $key): void
     {
-        $parts = explode(':', $key, 3);
-        $transport = $parts[1] ?? null;
+        $transport = self::transportOf($key);
         if (null === $transport || !$this->catalog->has($transport)) {
             return;
         }
 
         $this->selected = $transport;
-        match ($parts[2] ?? '') {
+        $id = self::messageOf($key);
+        if (null !== $id) {
+            $this->openEditor($transport, $id);
+            $this->refresh();
+
+            return;
+        }
+
+        match (self::actionOf($key)) {
             'workers' => $this->toggleWorkers($transport),
+            'concurrency' => $this->openPrompt($transport),
             self::VIEW_MESSAGES => $this->show($transport, self::VIEW_MESSAGES),
             self::VIEW_OPTIONS => $this->show($transport, self::VIEW_OPTIONS),
             default => $this->toggleActions($transport),
@@ -308,12 +557,98 @@ final class Dashboard
         $this->refresh();
     }
 
+    /**
+     * Menu keys are "transport:<name>", "action:<action>:<name>" and
+     * "failed:<hexadecimal id>:<name>": the name comes last, as it may contain ":".
+     */
+    private static function transportOf(string $key): ?string
+    {
+        $parts = explode(':', $key, 2);
+
+        return match ($parts[0]) {
+            'transport' => $parts[1] ?? null,
+            'action', 'failed' => explode(':', $parts[1] ?? '', 2)[1] ?? null,
+            default => null,
+        };
+    }
+
+    private static function messageOf(string $key): ?string
+    {
+        $parts = explode(':', $key, 3);
+        $id = 'failed' === $parts[0] ? hex2bin($parts[1] ?? '') : false;
+
+        return false === $id ? null : $id;
+    }
+
+    private function loadFailedMessage(string $transport, string $id): void
+    {
+        $loaded = $this->failedMessage;
+        if (null !== $loaded && $loaded['transport'] === $transport && $loaded['id'] === $id) {
+            return;
+        }
+
+        try {
+            $message = $this->failedMessages->get($transport, $id);
+            $error = null;
+        } catch (Throwable $exception) {
+            $message = null;
+            $error = (string) preg_replace('/\s+/', ' ', $exception->getMessage());
+        }
+
+        $this->failedMessage = ['transport' => $transport, 'id' => $id, 'message' => $message, 'error' => $error];
+    }
+
+    private function openEditor(string $transport, string $id): void
+    {
+        $this->loadFailedMessage($transport, $id);
+        $message = $this->failedMessage['message'] ?? null;
+        if (null === $message) {
+            $this->notify(sprintf('The message #%s cannot be read.', $id));
+
+            return;
+        }
+
+        if (null === $message->from) {
+            $this->notify(sprintf('The message #%s does not tell which transport it failed on.', $id));
+
+            return;
+        }
+
+        if (null === $message->json) {
+            $this->notify(sprintf('The message #%s cannot be edited: press r to send it back as is.', $id));
+
+            return;
+        }
+
+        $this->editing = [
+            'transport' => $transport,
+            'id' => $id,
+            'class' => $message->class,
+            'from' => $message->from,
+            'error' => null,
+        ];
+        $this->editor->setText($message->json);
+        $this->main->remove($this->body)->add($this->editor);
+        $this->tui->setFocus($this->editor);
+    }
+
+    private function closeEditor(): void
+    {
+        $this->editing = null;
+        $this->main->remove($this->editor)->add($this->body);
+        $this->tui->setFocus($this->menu);
+    }
+
+    private static function actionOf(string $key): ?string
+    {
+        $parts = explode(':', $key, 3);
+
+        return 'action' === $parts[0] ? $parts[1] ?? null : null;
+    }
+
     private function toggleWorkers(string $transport): void
     {
-        $definition = $this->catalog->get($transport);
-        if (!$definition->consumable) {
-            $this->notify(sprintf('"%s" cannot be consumed.', $transport));
-
+        if (!$this->canRunWorkers($transport)) {
             return;
         }
 
@@ -325,31 +660,112 @@ final class Dashboard
         }
 
         $count = $this->scale($transport);
-        $this->supervisor->scale($transport, $count);
+        $concurrency = $this->concurrency($transport);
+        $this->supervisor->scale($transport, $count, $concurrency);
         $this->views[$transport] = self::VIEW_ACTIVITY;
-        $this->notify(sprintf('Started %d worker%s on "%s".', $count, 1 === $count ? '' : 's', $transport));
+        $this->notify(sprintf(
+            'Started %d worker%s on "%s"%s.',
+            $count,
+            1 === $count ? '' : 's',
+            $transport,
+            $concurrency > 1 ? sprintf(', %d messages at a time each', $concurrency) : '',
+        ));
     }
 
     private function notify(string $notice): void
     {
         $this->notice = $notice;
-        $this->noticeAt = ($this->clock)();
+        $this->noticeAt = $this->now();
     }
 
     private function changeScale(string $transport, int $delta): void
     {
-        if (!$this->catalog->get($transport)->consumable) {
+        if (!$this->catalog->get($transport)->canRunWorkers()) {
             return;
         }
 
         $running = count($this->supervisor->active($transport));
-        $scale = max(1, min(self::MAX_SCALE, ($running > 0 ? $running : $this->scale($transport)) + $delta));
+        $maximum = max(1, intdiv(self::MAX_SLOTS, $this->concurrency($transport)));
+        $scale = max(1, min($maximum, ($running > 0 ? $running : $this->scale($transport)) + $delta));
         $this->scales[$transport] = $scale;
 
         if ($running > 0) {
-            $this->supervisor->scale($transport, $scale);
+            $this->supervisor->scale($transport, $scale, $this->concurrency($transport));
             $this->notify(sprintf('Scaled "%s" to %d worker%s.', $transport, $scale, 1 === $scale ? '' : 's'));
         }
+    }
+
+    /**
+     * Tells why when workers cannot be started on the transport.
+     */
+    private function canRunWorkers(string $transport): bool
+    {
+        $definition = $this->catalog->get($transport);
+        if ($definition->canRunWorkers()) {
+            return true;
+        }
+
+        $this->notify(
+            $definition->failureTransport
+                ? sprintf('"%s" is a failure transport: open it to send its messages back.', $transport)
+                : sprintf('"%s" cannot be consumed.', $transport),
+        );
+
+        return false;
+    }
+
+    private function openPrompt(string $transport): void
+    {
+        if (!$this->canRunWorkers($transport)) {
+            return;
+        }
+
+        if (!$this->parallel) {
+            $this->notify(sprintf('Handling several messages at a time needs %s.', self::PARALLEL_REQUIREMENTS));
+
+            return;
+        }
+
+        $this->prompt = ['transport' => $transport, 'value' => ''];
+    }
+
+    private function maxConcurrency(string $transport): int
+    {
+        $workers = count($this->supervisor->active($transport));
+
+        return max(1, intdiv(self::MAX_SLOTS, $workers > 0 ? $workers : $this->scale($transport)));
+    }
+
+    private function changeConcurrency(string $transport, string $value): void
+    {
+        if ('' === $value) {
+            return;
+        }
+
+        $concurrency = (int) $value;
+        $maximum = $this->maxConcurrency($transport);
+        if ($concurrency < 1 || $concurrency > $maximum) {
+            $this->notify(sprintf('The concurrency of "%s" must be between 1 and %d.', $transport, $maximum));
+
+            return;
+        }
+
+        $this->concurrencies[$transport] = $concurrency;
+        $running = count($this->supervisor->active($transport));
+        if (0 === $running) {
+            $this->notify(sprintf(
+                'Workers of "%s" will handle %d message%s at a time.',
+                $transport,
+                $concurrency,
+                1 === $concurrency ? '' : 's',
+            ));
+
+            return;
+        }
+
+        // The concurrency of a running worker cannot change: they are replaced
+        $this->supervisor->scale($transport, $running, $concurrency);
+        $this->notify(sprintf('Restarting the workers of "%s" with a concurrency of %d.', $transport, $concurrency));
     }
 
     private function toggleActions(string $transport): void
@@ -382,30 +798,60 @@ final class Dashboard
     private function refreshMenu(): void
     {
         $rows = [];
-        foreach ($this->catalog->all() as $name => $transport) {
+        foreach ($this->catalog->all() as $transport) {
+            $name = $transport->name;
             $rows[] = ['key' => 'transport:' . $name, 'label' => $this->transportLabel($transport)];
             if ($this->expanded !== $name) {
                 continue;
             }
 
+            if ($transport->failureTransport) {
+                foreach ($this->queues[$name]->messages ?? [] as $message) {
+                    if (null === $message['id']) {
+                        continue;
+                    }
+
+                    $rows[] = [
+                        'key' => 'failed:' . bin2hex($message['id']) . ':' . $name,
+                        'label' => sprintf(
+                            '  ├ #%s %s',
+                            Format::safe($message['id']),
+                            Format::safe(Format::shortClass($message['class'])),
+                        ),
+                    ];
+                }
+            }
+
             $rows[] = [
-                'key' => 'action:' . $name . ':' . self::VIEW_MESSAGES,
+                'key' => 'action:' . self::VIEW_MESSAGES . ':' . $name,
                 'label' => sprintf('  ├ Message classes (%d)', count($transport->messageClasses)),
             ];
-            if ($transport->consumable) {
+            if ($transport->canRunWorkers()) {
                 $active = count($this->supervisor->active($name));
                 $rows[] = [
-                    'key' => 'action:' . $name . ':workers',
+                    'key' => 'action:workers:' . $name,
                     'label' => 0 === $active
                         ? sprintf('  ├ Start workers (×%d)', $this->scale($name))
                         : sprintf('  ├ Stop workers (%d running)', $active),
                 ];
+                if ($this->parallel) {
+                    $rows[] = [
+                        'key' => 'action:concurrency:' . $name,
+                        'label' => sprintf('  ├ Concurrency (%d)', $this->concurrency($name)),
+                    ];
+                }
             }
 
-            $rows[] = ['key' => 'action:' . $name . ':' . self::VIEW_OPTIONS, 'label' => '  └ Options'];
+            $rows[] = ['key' => 'action:' . self::VIEW_OPTIONS . ':' . $name, 'label' => '  └ Options'];
         }
 
+        $cursor = $this->menu->cursorKey();
         $this->menu->setRows($rows);
+        if (null !== $cursor && $this->menu->cursorKey() !== $cursor) {
+            // The row under the cursor went away, like a message sent back
+            $this->selectedMessage = null;
+            $this->menu->moveTo('transport:' . ($this->selected ?? ''));
+        }
     }
 
     private function transportLabel(TransportDefinition $transport): string
@@ -417,7 +863,7 @@ final class Dashboard
         $count = $this->queues[$transport->name]->count ?? null;
         $queue = null === $count ? '' : Format::dim(sprintf(' (%d)', $count));
 
-        return $arrow . ($transport->consumable ? $name : Format::dim($name)) . $workers . $queue;
+        return $arrow . ($transport->canRunWorkers() ? $name : Format::dim($name)) . $workers . $queue;
     }
 
     /**
@@ -426,13 +872,23 @@ final class Dashboard
     private function paintHeader(int $columns): array
     {
         $running = 0;
-        foreach ($this->catalog->all() as $name => $_) {
-            $running += count($this->supervisor->active($name));
+        $slots = 0;
+        foreach ($this->catalog->all() as $transport) {
+            foreach ($this->supervisor->active($transport->name) as $worker) {
+                ++$running;
+                $slots += $worker->concurrency;
+            }
         }
 
         $title =
             Format::bold(Format::color(' Messenger Central', 'cyan'))
-            . Format::dim(sprintf('  ·  %d transports  ·  %d workers running', count($this->catalog->all()), $running));
+            . Format::dim(sprintf(
+                '  ·  %d transports  ·  %d worker%s running%s',
+                count($this->catalog->all()),
+                $running,
+                1 === $running ? '' : 's',
+                $slots > $running ? sprintf(', up to %d messages at a time', $slots) : '',
+            ));
 
         return [$title, Format::dim(Format::rule($columns))];
     }
@@ -449,16 +905,38 @@ final class Dashboard
         $selected = $this->selected;
         $transport = $this->catalog->get($selected);
 
+        $failedMessage = $this->failedMessage;
+        if (null !== $this->selectedMessage && null !== $failedMessage) {
+            return FailedMessageView::render(
+                $selected,
+                $failedMessage['message'],
+                $failedMessage['error'],
+                $this->now(),
+                $this->timezone,
+            );
+        }
+
+        if ($transport->failureTransport && self::VIEW_ACTIVITY === $this->view($selected)) {
+            return FailedMessagesView::render(
+                $transport,
+                $this->queues[$selected] ?? null,
+                $this->now(),
+                $this->timezone,
+            );
+        }
+
         return match ($this->view($selected)) {
             self::VIEW_MESSAGES => MessagesView::render($transport),
-            self::VIEW_OPTIONS => OptionsView::render($transport),
+            self::VIEW_OPTIONS => OptionsView::render($transport, $this->concurrency($selected), $this->parallel),
             default => ActivityView::render(
                 $transport,
                 $this->supervisor->workers($selected),
                 $this->supervisor->activity($selected),
                 $this->queues[$selected] ?? null,
                 $this->scale($selected),
-                ($this->clock)(),
+                $this->concurrency($selected),
+                $this->now(),
+                $this->timezone,
                 $columns,
                 $rows,
             ),
@@ -472,54 +950,115 @@ final class Dashboard
     {
         $lines = [Format::dim(Format::rule($columns))];
 
-        if (null !== $this->selected) {
-            $now = ($this->clock)();
-            $activity = $this->supervisor->activity($this->selected);
-            $workers = $this->supervisor->workers($this->selected);
-            [$memory, $peak] = self::memory($workers);
-
-            $lines[] = sprintf(
-                ' %s  %s  %s  %s  %.1f msg/s  memory %s, worker peak %s  %s',
-                Format::bold(Format::safe($this->selected)),
-                Format::color(sprintf('✓ %d processed', $activity->processed), 'green'),
-                Format::color(sprintf('✗ %d failed', $activity->failed), $activity->failed > 0 ? 'red' : 'gray'),
-                Format::color(sprintf('↻ %d retried', $activity->retried), $activity->retried > 0 ? 'yellow' : 'gray'),
-                $activity->rate($now),
-                Format::bytes($memory),
-                Format::bytes($peak),
-                Format::dim('up ' . Format::elapsed($now - $this->startedAt)),
-            );
+        $now = $this->now();
+        $selected = $this->selected;
+        if (null !== $selected) {
+            $lines[] = $this->summary($selected, $now);
         }
 
-        $help = ' ↑↓ move  ⏎ open  s start/stop  +/- scale  a activity  m messages  o options  q quit';
-        $lines[] =
-            Format::dim($help)
-            . (
-                null === $this->notice || (($this->clock)() - $this->noticeAt) > self::NOTICE_SECONDS
-                    ? ''
-                    : str_repeat(' ', 3) . Format::color($this->notice, 'yellow')
+        $failureTransport = null !== $selected && $this->catalog->get($selected)->failureTransport;
+
+        $editing = $this->editing;
+        if (null !== $editing) {
+            $lines[] = sprintf(
+                ' Editing %s #%s   %s',
+                Format::bold(Format::safe(Format::shortClass($editing['class']))),
+                Format::safe($editing['id']),
+                Format::dim(sprintf('ctrl+s send it back to %s  esc cancel', Format::safe($editing['from']))),
             );
+            if (null !== $editing['error']) {
+                $lines[] = ' ' . Format::color(Format::safe($editing['error']), 'red');
+            }
+
+            return $lines;
+        }
+
+        $prompt = $this->prompt;
+        if (null !== $prompt) {
+            $lines[] = sprintf(
+                ' Messages handled at a time by each worker of %s (1-%d): %s%s   %s',
+                Format::bold(Format::safe($prompt['transport'])),
+                $this->maxConcurrency($prompt['transport']),
+                $prompt['value'],
+                Format::color('█', 'cyan'),
+                Format::dim('⏎ apply  esc cancel'),
+            );
+
+            return $lines;
+        }
+
+        if (null !== $this->notice && ($now - $this->noticeAt) <= self::NOTICE_SECONDS) {
+            // In place of the help, that leaves too little room
+            $lines[] = ' ' . Format::color(Format::safe($this->notice), 'yellow');
+
+            return $lines;
+        }
+
+        $lines[] = Format::dim(match (true) {
+            null !== $this->selectedMessage => ' ↑↓ move  ⏎ edit and send back  r send back as is  q quit',
+            $failureTransport => ' ↑↓ move  ⏎ open  a failed messages  m messages  o options  q quit',
+            default => ' ↑↓ move  ⏎ open  s start/stop  +/- scale'
+                . ($this->parallel ? '  c concurrency' : '')
+                . '  a activity  m messages  o options  q quit',
+        });
 
         return $lines;
     }
 
     /**
+     * What the workers of a transport did, on a single line.
+     */
+    private function summary(string $transport, float $now): string
+    {
+        $uptime = Format::dim('up ' . Format::elapsed($now - $this->startedAt));
+        if (!$this->catalog->get($transport)->canRunWorkers()) {
+            return sprintf(' %s  %s', Format::bold(Format::safe($transport)), $uptime);
+        }
+
+        $activity = $this->supervisor->activity($transport);
+        [$memory, $peak, $children] = self::memory($this->supervisor->workers($transport));
+
+        return sprintf(
+            ' %s  %s  %s  %s  %.1f msg/s  memory %s, worker peak %s%s  %s',
+            Format::bold(Format::safe($transport)),
+            Format::color(sprintf('✓ %d processed', $activity->processed), 'green'),
+            Format::color(sprintf('✗ %d failed', $activity->failed), $activity->failed > 0 ? 'red' : 'gray'),
+            Format::color(sprintf('↻ %d retried', $activity->retried), $activity->retried > 0 ? 'yellow' : 'gray'),
+            $activity->rate($now),
+            Format::bytes($memory),
+            Format::bytes($peak),
+            $children ? Format::dim(' (child processes excluded)') : '',
+            $uptime,
+        );
+    }
+
+    /**
      * @param list<WorkerProcess> $workers
      *
-     * @return array{int, int} memory used by the running workers, and the highest peak
+     * @return array{int, int, bool} memory used by the running workers, the highest peak, and whether
+     *                               workers have child processes, whose memory is not reported
      */
     private static function memory(array $workers): array
     {
         $memory = 0;
         $peak = 0;
+        $children = false;
         foreach ($workers as $worker) {
             if (WorkerStatus::Exited !== $worker->status) {
                 $memory += $worker->memory;
+                $children = $children || $worker->concurrency > 1;
             }
 
             $peak = max($peak, $worker->peakMemory);
         }
 
-        return [$memory, $peak];
+        return [$memory, $peak, $children];
+    }
+
+    private function now(): float
+    {
+        $now = $this->clock->now();
+
+        return $now->getTimestamp() + ($now->getMicrosecond() / 1_000_000);
     }
 }

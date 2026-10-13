@@ -9,6 +9,8 @@ use Symfony\Bundle\FrameworkBundle\Kernel\MicroKernelTrait;
 use Symfony\Component\Config\Loader\LoaderInterface;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\HttpKernel\Kernel;
+use Symfony\Component\Messenger\Retry\MultiplierRetryStrategy;
+use Symfony\Component\Messenger\Transport\InMemory\InMemoryTransport;
 use Welcomattic\MessengerCentral\MessengerCentralBundle;
 
 use function sys_get_temp_dir;
@@ -18,10 +20,12 @@ final class TestKernel extends Kernel
     use MicroKernelTrait;
 
     /**
-     * @param array<string, mixed> $messengerConfig
+     * @param array<array-key, mixed> $messengerConfig
+     * @param array<string, mixed>    $centralConfig
      */
     public function __construct(
         private readonly array $messengerConfig = [],
+        private readonly array $centralConfig = [],
         string $environment = 'test',
     ) {
         parent::__construct($environment, true);
@@ -61,12 +65,19 @@ final class TestKernel extends Kernel
                 'messenger' => $this->messengerConfig,
             ]);
 
+            $container->loadFromExtension('messenger_central', $this->centralConfig);
+
             $container->register(TestHandler::class)->setAutoconfigured(true)->setPublic(false);
+            $container->register('test.retry_strategy', MultiplierRetryStrategy::class);
+            // A transport that is not built from a DSN
+            $container->register('test.custom_transport', InMemoryTransport::class)->addTag('messenger.receiver', [
+                'alias' => 'custom',
+            ]);
         });
     }
 
     private function getConfigHash(): string
     {
-        return md5(serialize($this->messengerConfig));
+        return md5(serialize([$this->messengerConfig, $this->centralConfig]));
     }
 }

@@ -35,6 +35,9 @@ final readonly class TransportDefinition
         public ?array $retryStrategy = null,
         public ?string $serializer = null,
         public array $messageClasses = [],
+        public bool $signed = false,
+        public bool $claimCheck = false,
+        public ?int $priority = null,
     ) {}
 
     /**
@@ -46,6 +49,9 @@ final readonly class TransportDefinition
      *     failure_transport_name?: string|null,
      *     retry_strategy?: array<string, int|float>|null,
      *     serializer?: string|null,
+     *     signed?: bool,
+     *     claim_check?: bool,
+     *     priority?: int|null,
      *     message_classes?: list<string>,
      * } $data
      */
@@ -61,7 +67,19 @@ final readonly class TransportDefinition
             $data['retry_strategy'] ?? null,
             $data['serializer'] ?? null,
             $data['message_classes'] ?? [],
+            $data['signed'] ?? false,
+            $data['claim_check'] ?? false,
+            $data['priority'] ?? null,
         );
+    }
+
+    /**
+     * Whether workers can be started on this transport. The messages of a
+     * failure transport are edited and sent back instead.
+     */
+    public function canRunWorkers(): bool
+    {
+        return $this->consumable && !$this->failureTransport;
     }
 
     /**

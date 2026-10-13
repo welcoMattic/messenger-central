@@ -30,7 +30,7 @@ final class TransportActivity
     public int $failed = 0;
     public int $retried = 0;
 
-    /** @var list<array{at: float, worker: int, class: string, id: string|null, status: string, duration: float|null, error: string|null}> most recent first */
+    /** @var list<array{at: float, worker: int, class: string, id: string|null, retry: int, status: string, duration: float|null, error: string|null}> most recent first */
     public array $recent = [];
 
     /** @var array<int, int> second => messages received during that second */
@@ -103,6 +103,7 @@ final class TransportActivity
             'worker' => $workerId,
             'class' => is_string($report['class'] ?? null) ? $report['class'] : '?',
             'id' => is_string($report['id'] ?? null) ? $report['id'] : null,
+            'retry' => is_int($report['retry'] ?? null) ? $report['retry'] : 0,
             'status' => $status,
             'duration' => is_float($duration) || is_int($duration) ? (float) $duration : null,
             'error' => is_string($report['error'] ?? null) ? $report['error'] : null,

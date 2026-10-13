@@ -18,6 +18,10 @@
     ],
     "require": {
         "php": ">=8.4.1",
+        "ext-mbstring": "*",
+        "psr/container": "^1.1|^2.0",
+        "revolt/event-loop": "^1.0",
+        "symfony/clock": "^8.1",
         "symfony/config": "^8.1",
         "symfony/console": "^8.1",
         "symfony/dependency-injection": "^8.1",
@@ -26,6 +30,10 @@
         "symfony/messenger": "^8.1",
         "symfony/process": "^8.1",
         "symfony/tui": "^8.1"
+    },
+    "suggest": {
+        "ext-pcntl": "To let workers finish their current messages when they are stopped",
+        "amphp/parallel": "To handle several messages at the same time in each worker, with Symfony 8.2"
     },
     "require-dev": {
         "carthage-software/mago": "^1.56",

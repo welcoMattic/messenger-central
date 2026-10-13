@@ -8,6 +8,7 @@ use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Style\SymfonyStyle;
 use Symfony\Component\Tui\Terminal\Terminal;
+use Welcomattic\MessengerCentral\Failure\FailedMessages;
 use Welcomattic\MessengerCentral\Transport\QueueInspector;
 use Welcomattic\MessengerCentral\Transport\TransportCatalog;
 use Welcomattic\MessengerCentral\Tui\Dashboard;
@@ -25,6 +26,8 @@ final readonly class CentralCommand
         private TransportCatalog $catalog,
         private WorkerSupervisor $supervisor,
         private QueueInspector $inspector,
+        private FailedMessages $failedMessages,
+        private int $concurrency = 1,
     ) {}
 
     public function __invoke(SymfonyStyle $io): int
@@ -42,7 +45,14 @@ final readonly class CentralCommand
         }
 
         try {
-            new Dashboard($this->catalog, $this->supervisor, $this->inspector, new Terminal())->run();
+            new Dashboard(
+                $this->catalog,
+                $this->supervisor,
+                $this->inspector,
+                $this->failedMessages,
+                new Terminal(),
+                concurrency: $this->concurrency,
+            )->run();
         } finally {
             if ($this->supervisor->hasRunning()) {
                 $io->writeln('Stopping the workers…');

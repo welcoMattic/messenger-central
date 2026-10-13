@@ -7,6 +7,7 @@ namespace Welcomattic\MessengerCentral\Worker;
 use JsonException;
 
 use function is_array;
+use function is_string;
 use function json_decode;
 use function json_encode;
 use function strlen;
@@ -14,6 +15,7 @@ use function strpos;
 use function substr;
 
 use const JSON_INVALID_UTF8_SUBSTITUTE;
+use const JSON_PRESERVE_ZERO_FRACTION;
 use const JSON_THROW_ON_ERROR;
 use const JSON_UNESCAPED_SLASHES;
 use const JSON_UNESCAPED_UNICODE;
@@ -42,7 +44,11 @@ final class WorkerReport
             self::MARKER
             . json_encode(
                 ['type' => $type] + $payload,
-                JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE,
+                JSON_THROW_ON_ERROR
+                | JSON_UNESCAPED_SLASHES
+                | JSON_UNESCAPED_UNICODE
+                | JSON_INVALID_UTF8_SUBSTITUTE
+                | JSON_PRESERVE_ZERO_FRACTION,
             )
             . "\n"
         );
@@ -64,7 +70,7 @@ final class WorkerReport
             return null;
         }
 
-        if (!is_array($report) || !isset($report['type'])) {
+        if (!is_array($report) || !is_string($report['type'] ?? null)) {
             return null;
         }
 

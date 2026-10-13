@@ -7,14 +7,17 @@ namespace Welcomattic\MessengerCentral\Tests\Functional;
 use PHPUnit\Framework\TestCase;
 use Psr\Container\ContainerInterface;
 use Symfony\Bundle\FrameworkBundle\Console\Application;
+use Symfony\Component\Config\Definition\Exception\InvalidConfigurationException;
 use Symfony\Component\Console\Tester\CommandTester;
 use Welcomattic\MessengerCentral\DependencyInjection\CollectTransportsPass;
 use Welcomattic\MessengerCentral\Tests\Fixtures\App\TestKernel;
 use Welcomattic\MessengerCentral\Tests\Fixtures\Message\AttributeMessage;
 use Welcomattic\MessengerCentral\Tests\Fixtures\Message\RoutedByClass;
 use Welcomattic\MessengerCentral\Transport\TransportCatalog;
+use Welcomattic\MessengerCentral\Transport\TransportDefinition;
+use Welcomattic\MessengerCentral\Worker\WorkerSupervisor;
 
-use function array_keys;
+use function array_map;
 use function putenv;
 use function restore_exception_handler;
 use function set_exception_handler;
@@ -32,6 +35,8 @@ final class BundleTest extends TestCase
             'high' => '%env(MESSENGER_CENTRAL_TEST_DSN)%',
             'failed' => 'in-memory://',
             'sync' => 'sync://',
+            // An integer key, as YAML gives for "123:"
+            123 => ['dsn' => 'in-memory://', 'retry_strategy' => ['service' => 'test.retry_strategy']],
         ],
         'routing' => [
             RoutedByClass::class => 'async',
@@ -79,7 +84,10 @@ final class BundleTest extends TestCase
 
         // Then
         static::assertInstanceOf(TransportCatalog::class, $catalog);
-        static::assertSame(['async', 'high', 'failed', 'sync'], array_keys($catalog->all()));
+        static::assertSame(
+            ['custom', 'async', 'high', 'failed', 'sync', '123'],
+            array_map(static fn(TransportDefinition $transport): string => $transport->name, $catalog->all()),
+        );
 
         $async = $catalog->get('async');
         static::assertSame('in-memory://', $async->dsn);
@@ -102,6 +110,42 @@ final class BundleTest extends TestCase
 
         static::assertTrue($catalog->get('failed')->failureTransport);
         static::assertFalse($catalog->get('sync')->consumable);
+
+        $numeric = $catalog->get('123');
+        static::assertSame('in-memory://', $numeric->dsn);
+        static::assertSame('failed', $numeric->failureTransportName);
+        static::assertNull($numeric->retryStrategy, 'A retry strategy service');
+
+        $custom = $catalog->get('custom');
+        static::assertNull($custom->dsn);
+        static::assertTrue($custom->consumable);
+    }
+
+    public function testItConfiguresTheWorkers(): void
+    {
+        // Given
+        $kernel = $this->boot(self::MESSENGER, [
+            'consume_options' => ['--time-limit=60'],
+            'concurrency' => 4,
+            'stop_timeout' => 30,
+        ]);
+
+        // When
+        $container = $kernel->getContainer()->get('test.service_container');
+
+        // Then
+        static::assertInstanceOf(ContainerInterface::class, $container);
+        static::assertInstanceOf(WorkerSupervisor::class, $container->get('messenger_central.worker_supervisor'));
+    }
+
+    public function testItRefusesTheConcurrencyInTheConsumeOptions(): void
+    {
+        // Then
+        $this->expectException(InvalidConfigurationException::class);
+        $this->expectExceptionMessage('Set the "concurrency" option instead of "--concurrency".');
+
+        // When
+        $this->boot(self::MESSENGER, ['consume_options' => ['--concurrency=4']]);
     }
 
     public function testItRegistersTheCommand(): void
@@ -133,11 +177,12 @@ final class BundleTest extends TestCase
     }
 
     /**
-     * @param array<string, mixed> $messenger
+     * @param array<array-key, mixed> $messenger
+     * @param array<string, mixed>    $central
      */
-    private function boot(array $messenger): TestKernel
+    private function boot(array $messenger, array $central = []): TestKernel
     {
-        $this->kernel = new TestKernel($messenger);
+        $this->kernel = new TestKernel($messenger, $central);
         $this->kernel->boot();
 
         return $this->kernel;

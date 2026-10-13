@@ -10,8 +10,10 @@ namespace Welcomattic\MessengerCentral\Transport;
 final readonly class QueueSnapshot
 {
     /**
-     * @param int|null                                        $count    null when the transport cannot count its messages
-     * @param list<array{class: string, id: string|null}>|null $messages null when the transport cannot list its messages
+     * @param int|null $count null when the transport cannot count its messages
+     * @param list<array{class: string, id: string|null, from: string|null, failed_at: float|null, error: string|null}>|null $messages
+     *        null when the transport cannot list its messages; "from" is set for the messages of a failure
+     *        transport, "failed_at" and "error" for the messages that failed before
      */
     public function __construct(
         public float $at,

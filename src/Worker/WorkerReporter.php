@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Welcomattic\MessengerCentral\Worker;
 
+use Symfony\Component\Clock\ClockInterface;
+use Symfony\Component\Clock\NativeClock;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 use Symfony\Component\Messenger\Envelope;
 use Symfony\Component\Messenger\Event\WorkerMessageFailedEvent;
@@ -16,20 +18,21 @@ use Symfony\Component\Messenger\Exception\HandlerFailedException;
 use Symfony\Component\Messenger\Stamp\RedeliveryStamp;
 use Symfony\Component\Messenger\Stamp\TransportMessageIdStamp;
 use Throwable;
+use WeakMap;
 
+use function count;
 use function fflush;
 use function fopen;
 use function fwrite;
 use function getmypid;
-use function hrtime;
-use function intdiv;
 use function is_resource;
 use function mb_substr;
 use function memory_get_peak_usage;
 use function memory_get_usage;
-use function microtime;
 use function preg_replace;
+use function restore_error_handler;
 use function round;
+use function set_error_handler;
 
 /**
  * Reports what a worker does to the dashboard that started it.
@@ -37,6 +40,9 @@ use function round;
  * The listener is always registered but stays silent unless the worker was
  * spawned by the dashboard, which sets the MESSENGER_CENTRAL_WORKER
  * environment variable.
+ *
+ * Messages are tracked one by one: with "--concurrency" (Symfony 8.2) or
+ * batch handlers, several of them are in flight at the same time.
  */
 final class WorkerReporter implements EventSubscriberInterface
 {
@@ -47,8 +53,14 @@ final class WorkerReporter implements EventSubscriberInterface
     /** @var resource|null */
     private $stream;
 
-    private ?int $receivedAt = null;
-    private int $lastHeartbeatAt = 0;
+    /** @var WeakMap<object, array{seq: int, at: float}> messages received and not handled yet */
+    private WeakMap $inFlight;
+
+    private int $sequence = 0;
+    private float $lastHeartbeatAt = 0.0;
+
+    // The dashboard went away: nobody reads the reports anymore
+    private bool $orphaned = false;
 
     /**
      * @param resource|null $stream defaults to the standard output
@@ -57,8 +69,10 @@ final class WorkerReporter implements EventSubscriberInterface
         private readonly ?string $workerId,
         $stream = null,
         private readonly int $heartbeatIntervalMs = 1000,
+        private readonly ClockInterface $clock = new NativeClock(),
     ) {
         $this->stream = $stream;
+        $this->inFlight = new WeakMap();
     }
 
     public static function getSubscribedEvents(): array
@@ -76,22 +90,20 @@ final class WorkerReporter implements EventSubscriberInterface
 
     public function onWorkerStarted(WorkerStartedEvent $event): void
     {
-        $this->report(WorkerReport::STARTED, [
-            'pid' => getmypid(),
-            'transports' => $event->getWorker()->getMetadata()->getTransportNames(),
-        ] + $this->memory());
+        $this->report(WorkerReport::STARTED, ['pid' => getmypid()] + $this->memory());
     }
 
     public function onMessageReceived(WorkerMessageReceivedEvent $event): void
     {
-        if (!$event->shouldHandle()) {
+        if (null === $this->workerId || !$event->shouldHandle()) {
             return;
         }
 
-        $this->receivedAt = self::nanoseconds();
+        $received = ['seq' => ++$this->sequence, 'at' => $this->now()];
+        $this->inFlight[$event->getEnvelope()->getMessage()] = $received;
         $this->report(
             WorkerReport::RECEIVED,
-            $this->describe($event->getEnvelope(), $event->getReceiverName()) + ['at' => microtime(true)],
+            $this->describe($event->getEnvelope(), $event->getReceiverName()) + $received,
         );
     }
 
@@ -99,7 +111,9 @@ final class WorkerReporter implements EventSubscriberInterface
     {
         $this->report(
             WorkerReport::HANDLED,
-            $this->describe($event->getEnvelope(), $event->getReceiverName()) + $this->duration() + $this->memory(),
+            $this->describe($event->getEnvelope(), $event->getReceiverName())
+            + $this->finish($event->getEnvelope())
+            + $this->memory(),
         );
     }
 
@@ -117,7 +131,7 @@ final class WorkerReporter implements EventSubscriberInterface
                 'will_retry' => $event->willRetry(),
                 'error' => $error::class . ': ' . $this->singleLine($error),
             ]
-            + $this->duration()
+            + $this->finish($event->getEnvelope())
             + $this->memory(),
         );
     }
@@ -128,13 +142,16 @@ final class WorkerReporter implements EventSubscriberInterface
             return;
         }
 
-        $now = intdiv(self::nanoseconds(), 1_000_000);
-        if (($now - $this->lastHeartbeatAt) < $this->heartbeatIntervalMs) {
-            return;
+        $now = $this->now();
+        if (!$this->orphaned && (($now - $this->lastHeartbeatAt) * 1000) >= $this->heartbeatIntervalMs) {
+            $this->lastHeartbeatAt = $now;
+            $this->report(WorkerReport::HEARTBEAT, ['in_flight' => count($this->inFlight)] + $this->memory());
         }
 
-        $this->lastHeartbeatAt = $now;
-        $this->report(WorkerReport::HEARTBEAT, ['idle' => $event->isWorkerIdle()] + $this->memory());
+        if ($this->orphaned) {
+            // Without the dashboard, nothing would ever stop this worker
+            $event->getWorker()->stop();
+        }
     }
 
     public function onWorkerStopped(WorkerStoppedEvent $event): void
@@ -147,7 +164,7 @@ final class WorkerReporter implements EventSubscriberInterface
      */
     private function report(string $type, array $payload): void
     {
-        if (null === $this->workerId) {
+        if (null === $this->workerId || $this->orphaned) {
             return;
         }
 
@@ -160,8 +177,20 @@ final class WorkerReporter implements EventSubscriberInterface
             $this->stream = $stream;
         }
 
-        fwrite($this->stream, WorkerReport::encode($type, ['worker' => $this->workerId] + $payload));
-        fflush($this->stream);
+        $line = WorkerReport::encode($type, ['worker' => $this->workerId] + $payload);
+
+        // Writing to the pipe of a dashboard that went away raises a "broken
+        // pipe" notice, that the error handler of the application may throw
+        set_error_handler(static fn(): bool => true);
+        try {
+            $written = false !== fwrite($this->stream, $line) && fflush($this->stream);
+        } finally {
+            restore_error_handler();
+        }
+
+        if (!$written) {
+            $this->orphaned = true;
+        }
     }
 
     /**
@@ -180,18 +209,21 @@ final class WorkerReporter implements EventSubscriberInterface
     }
 
     /**
-     * @return array{duration_ms?: float}
+     * @return array{seq?: int, duration_ms?: float}
      */
-    private function duration(): array
+    private function finish(Envelope $envelope): array
     {
-        if (null === $this->receivedAt) {
+        // Symfony keeps the message object of the received envelope, even when
+        // another process handled it
+        $message = $envelope->getMessage();
+        $received = $this->inFlight[$message] ?? null;
+        if (null === $received) {
             return [];
         }
 
-        $duration = round((self::nanoseconds() - $this->receivedAt) / 1_000_000, 2);
-        $this->receivedAt = null;
+        unset($this->inFlight[$message]);
 
-        return ['duration_ms' => $duration];
+        return ['seq' => $received['seq'], 'duration_ms' => round(($this->now() - $received['at']) * 1000, 2)];
     }
 
     /**
@@ -202,9 +234,11 @@ final class WorkerReporter implements EventSubscriberInterface
         return ['memory' => memory_get_usage(true), 'peak_memory' => memory_get_peak_usage(true)];
     }
 
-    private static function nanoseconds(): int
+    private function now(): float
     {
-        return (int) hrtime(true);
+        $now = $this->clock->now();
+
+        return $now->getTimestamp() + ($now->getMicrosecond() / 1_000_000);
     }
 
     private function singleLine(Throwable $error): string

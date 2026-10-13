@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Welcomattic\MessengerCentral\Tui\View;
 
+use DateTimeZone;
 use Welcomattic\MessengerCentral\Transport\QueueSnapshot;
 use Welcomattic\MessengerCentral\Transport\TransportDefinition;
 use Welcomattic\MessengerCentral\Tui\Format;
@@ -13,8 +14,6 @@ use Welcomattic\MessengerCentral\Worker\WorkerStatus;
 
 use function array_slice;
 use function count;
-use function date;
-use function end;
 use function max;
 use function min;
 use function sprintf;
@@ -39,7 +38,9 @@ final class ActivityView
         TransportActivity $activity,
         ?QueueSnapshot $queue,
         int $desiredScale,
+        int $concurrency,
         float $now,
+        DateTimeZone $timezone,
         int $columns,
         int $rows,
     ): array {
@@ -49,7 +50,7 @@ final class ActivityView
             '',
             ...self::incoming($activity, $now, $columns),
             '',
-            ...self::workers($transport, $workers, $desiredScale, $now),
+            ...self::workers($transport, $workers, $desiredScale, $concurrency, $now),
             '',
             ...self::queue($queue),
             '',
@@ -58,7 +59,7 @@ final class ActivityView
         $remaining = $rows - count($lines) - 1;
         if ($remaining > 0) {
             $lines[] = Format::bold('Recent');
-            foreach (self::recent($activity, $remaining) as $line) {
+            foreach (self::recent($activity, $timezone, $remaining) as $line) {
                 $lines[] = $line;
             }
         }
@@ -123,9 +124,13 @@ final class ActivityView
         TransportDefinition $transport,
         array $workers,
         int $desiredScale,
+        int $concurrency,
         float $now,
     ): array {
-        $lines = [Format::bold('Workers')];
+        $lines = [
+            Format::bold('Workers')
+                . ($concurrency > 1 ? Format::dim(sprintf('  %d messages at a time each', $concurrency)) : ''),
+        ];
         if ([] === $workers) {
             $lines[] = $transport->consumable
                 ? Format::dim(sprintf(
@@ -163,7 +168,7 @@ final class ActivityView
                 : Format::color('●', 'green'),
             WorkerStatus::Starting => Format::color(Format::spinner($now), 'gray'),
             WorkerStatus::Stopping => Format::color('◌', 'yellow'),
-            WorkerStatus::Exited => Format::color('✗', 0 === $worker->exitCode ? 'gray' : 'red'),
+            WorkerStatus::Exited => Format::color('✗', $worker->exitedCleanly() ? 'gray' : 'red'),
         };
 
         $head = sprintf(' %s #%-3d %-11s', $icon, $worker->id, null === $worker->pid ? '' : 'pid ' . $worker->pid);
@@ -174,29 +179,38 @@ final class ActivityView
         $memory = $worker->memory > 0 ? Format::dim(Format::bytes($worker->memory)) . '  ' : '';
 
         if (WorkerStatus::Exited === $worker->status) {
-            if (0 === $worker->exitCode) {
+            if ($worker->exitedCleanly()) {
                 return $head . Format::dim('stopped') . '  ' . $counters;
             }
-
-            $output = $worker->output;
 
             return sprintf(
                 '%s%s  %s  %s',
                 $head,
                 Format::color(sprintf('exited with code %s', $worker->exitCode ?? '?'), 'red'),
                 $counters,
-                Format::dim([] === $output ? '' : Format::safe(end($output))),
+                Format::dim(Format::safe($worker->error() ?? '')),
             );
         }
 
-        $current = $worker->current;
+        $oldest = $worker->oldest();
+        $inFlight = count($worker->inFlight);
         $doing = match (true) {
-            null !== $current => Format::safe($current['class'])
-                . (null === $current['id'] ? '' : Format::dim(' #' . Format::safe($current['id'])))
+            WorkerStatus::Stopping === $worker->status => Format::dim(
+                0 === $inFlight
+                    ? 'stopping…'
+                    : sprintf('stopping, finishing %d message%s…', $inFlight, 1 === $inFlight ? '' : 's'),
+            ),
+            null !== $oldest => (
+                $worker->concurrency > 1
+                    ? Format::color(sprintf('%d/%d busy', $inFlight, $worker->concurrency), 'cyan') . '  '
+                    : ''
+            )
+                . Format::safe($oldest['class'])
+                . (null === $oldest['id'] ? '' : Format::dim(' #' . Format::safe($oldest['id'])))
+                . ($oldest['retry'] > 0 ? Format::color(' ↻' . $oldest['retry'], 'yellow') : '')
                 . '  '
-                . Format::color(Format::duration(($now - $current['since']) * 1000), 'cyan'),
+                . Format::color(Format::duration(($now - $oldest['since']) * 1000), 'cyan'),
             WorkerStatus::Starting === $worker->status => Format::dim('starting…'),
-            WorkerStatus::Stopping === $worker->status => Format::dim('stopping…'),
             $recentlyBusy => Format::dim(Format::safe($last['class']))
                 . '  '
                 . Format::dim(Format::duration($last['duration'])),
@@ -242,7 +256,7 @@ final class ActivityView
     /**
      * @return list<string>
      */
-    private static function recent(TransportActivity $activity, int $limit): array
+    private static function recent(TransportActivity $activity, DateTimeZone $timezone, int $limit): array
     {
         if ([] === $activity->recent) {
             return [Format::dim('  Nothing handled yet.')];
@@ -258,10 +272,15 @@ final class ActivityView
 
             $line = sprintf(
                 ' %s %s  %s  %s',
-                Format::dim(date('H:i:s', (int) $event['at'])),
+                Format::dim(Format::time($event['at'], $timezone)),
                 $icon,
                 Format::safe($event['class']),
-                Format::dim(sprintf('%s  #%d', Format::duration($event['duration']), $event['worker'])),
+                Format::dim(sprintf(
+                    '%s  #%d%s',
+                    Format::duration($event['duration']),
+                    $event['worker'],
+                    $event['retry'] > 0 ? sprintf('  retry %d', $event['retry']) : '',
+                )),
             );
             if (null !== $event['error']) {
                 $line .= '  ' . Format::color(Format::safe($event['error']), 'red');

@@ -24,7 +24,7 @@ final readonly class ConsumeProcessFactory implements ProcessFactory
         private ?string $phpBinary = null,
     ) {}
 
-    public function create(string $transport, int $workerId): Process
+    public function create(string $transport, int $workerId, int $concurrency = 1): Process
     {
         $php = $this->phpBinary ?? new PhpExecutableFinder()->find(false);
 
@@ -34,6 +34,7 @@ final readonly class ConsumeProcessFactory implements ProcessFactory
             'messenger:consume',
             $transport,
             '--no-interaction',
+            ...($concurrency > 1 ? ['--concurrency=' . $concurrency] : []),
             ...$this->consumeOptions,
         ], env: [
             WorkerReporter::ENV_VAR => (string) $workerId,

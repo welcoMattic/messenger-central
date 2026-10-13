@@ -12,12 +12,14 @@ use Welcomattic\MessengerCentral\Transport\MessageRouter;
 
 use function array_key_exists;
 use function array_keys;
+use function in_array;
 use function is_array;
 use function is_float;
 use function is_int;
 use function is_string;
 use function str_contains;
 use function str_ends_with;
+use function str_starts_with;
 
 /**
  * Snapshots the Messenger transports, their options and routed messages
@@ -34,6 +36,7 @@ final class CollectTransportsPass implements CompilerPassInterface
     private const array SERVICE_IDS = [
         self::CATALOG_ID,
         'messenger_central.queue_inspector',
+        'messenger_central.failed_messages',
         'messenger_central.process_factory',
         'messenger_central.worker_supervisor',
         'messenger_central.worker_reporter',
@@ -66,7 +69,10 @@ final class CollectTransportsPass implements CompilerPassInterface
         $transports = [];
         foreach ($container->findTaggedServiceIds('messenger.receiver') as $id => $tags) {
             foreach ($tags as $tag) {
-                $name = is_string($tag['alias'] ?? null) ? $tag['alias'] : $id;
+                $alias = $tag['alias'] ?? null;
+                // A transport named "123" in YAML has an integer name
+                $name = is_string($alias) || is_int($alias) ? (string) $alias : $id;
+                $priority = $tag['priority'] ?? null;
                 $transports[$name] =
                     [
                         'consumable' => false !== ($tag['is_consumable'] ?? true),
@@ -74,7 +80,8 @@ final class CollectTransportsPass implements CompilerPassInterface
                         'failure_transport_name' => $failureTransportByName[$name] ?? null,
                         'retry_strategy' => $this->retryStrategy($container, $name),
                         'message_classes' => $messagesByTransport[$name] ?? [],
-                    ] + $this->factoryArguments($container->getDefinition($id));
+                        'priority' => is_int($priority) ? $priority : null,
+                    ] + $this->factoryArguments($container, $container->getDefinition($id));
             }
         }
 
@@ -82,9 +89,9 @@ final class CollectTransportsPass implements CompilerPassInterface
     }
 
     /**
-     * @return array{dsn?: string, options?: array<array-key, mixed>, serializer?: string}
+     * @return array{dsn?: string, options?: array<array-key, mixed>, serializer?: string, signed?: bool, claim_check?: bool}
      */
-    private function factoryArguments(Definition $definition): array
+    private function factoryArguments(ContainerBuilder $container, Definition $definition): array
     {
         $factory = $definition->getFactory();
         if (
@@ -108,14 +115,53 @@ final class CollectTransportsPass implements CompilerPassInterface
         }
 
         if (($arguments[2] ?? null) instanceof Reference) {
-            $result['serializer'] = (string) $arguments[2];
+            $result += $this->serializer($container, (string) $arguments[2]);
         }
 
         return $result;
     }
 
     /**
-     * @return array<string, string>
+     * Symfony 8.2 wraps the serializer of each transport, to sign messages
+     * and to claim check large ones: unwraps it to show the configured one.
+     *
+     * @return array{serializer: string, signed: bool, claim_check: bool}
+     */
+    private function serializer(ContainerBuilder $container, string $id): array
+    {
+        $signed = false;
+        $claimCheck = false;
+        while (str_starts_with($id, '.messenger.transport.') && $container->hasDefinition($id)) {
+            // A child definition keeps its replaced arguments as "index_N"
+            $arguments = $container->getDefinition($id)->getArguments();
+
+            // Every message, with the "sign" option, and not only the types that require it
+            $signedTypes = $arguments['index_2'] ?? [];
+            if (
+                str_ends_with($id, '.signing_serializer')
+                && is_array($signedTypes)
+                && in_array('*', $signedTypes, true)
+            ) {
+                $signed = true;
+            }
+
+            if (str_ends_with($id, '.claim_check_serializer')) {
+                $claimCheck = true;
+            }
+
+            $inner = $arguments['index_0'] ?? $arguments[0] ?? null;
+            if (!$inner instanceof Reference) {
+                break;
+            }
+
+            $id = (string) $inner;
+        }
+
+        return ['serializer' => $id, 'signed' => $signed, 'claim_check' => $claimCheck];
+    }
+
+    /**
+     * @return array<array-key, string>
      */
     private function failureTransportByName(ContainerBuilder $container): array
     {
@@ -128,11 +174,11 @@ final class CollectTransportsPass implements CompilerPassInterface
 
         $result = [];
         foreach (is_array($mapping) ? $mapping : [] as $transport => $failureTransport) {
-            if (!is_string($transport) || !is_string($failureTransport)) {
+            if (!is_string($failureTransport) && !is_int($failureTransport)) {
                 continue;
             }
 
-            $result[$transport] = $failureTransport;
+            $result[$transport] = (string) $failureTransport;
         }
 
         return $result;

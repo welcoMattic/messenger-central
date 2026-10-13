@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Welcomattic\MessengerCentral\Tui;
 
+use DateTimeImmutable;
+use DateTimeZone;
 use Symfony\Component\Tui\Ansi\AnsiUtils;
 use Symfony\Component\Tui\Widget\Util\StringUtils;
 
@@ -16,6 +18,8 @@ use function min;
 use function round;
 use function sprintf;
 use function str_repeat;
+use function strrchr;
+use function substr;
 
 /**
  * Formatting helpers shared by the views.
@@ -60,6 +64,16 @@ final class Format
     }
 
     /**
+     * The class name without its namespace.
+     */
+    public static function shortClass(string $class): string
+    {
+        $short = strrchr($class, '\\');
+
+        return false === $short ? $class : substr($short, 1);
+    }
+
+    /**
      * Pads (or cuts) text to an exact visible width.
      */
     public static function pad(string $text, int $width): string
@@ -83,6 +97,22 @@ final class Format
             $milliseconds < 1000 => sprintf('%.1f ms', $milliseconds),
             default => sprintf('%.2f s', $milliseconds / 1000),
         };
+    }
+
+    public static function time(float $timestamp, DateTimeZone $timezone): string
+    {
+        return DateTimeImmutable::createFromTimestamp($timestamp)->setTimezone($timezone)->format('H:i:s');
+    }
+
+    /**
+     * The time, with the day when it is not the one of $now.
+     */
+    public static function moment(float $timestamp, DateTimeZone $timezone, float $now): string
+    {
+        $moment = DateTimeImmutable::createFromTimestamp($timestamp)->setTimezone($timezone);
+        $today = DateTimeImmutable::createFromTimestamp($now)->setTimezone($timezone);
+
+        return $moment->format($moment->format('Y-m-d') === $today->format('Y-m-d') ? 'H:i:s' : 'Y-m-d H:i:s');
     }
 
     public static function elapsed(float $seconds): string

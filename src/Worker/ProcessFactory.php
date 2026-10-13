@@ -11,5 +11,8 @@ use Symfony\Component\Process\Process;
  */
 interface ProcessFactory
 {
-    public function create(string $transport, int $workerId): Process;
+    /**
+     * @param int $concurrency messages handled at the same time by the worker, needs Symfony 8.2 above 1
+     */
+    public function create(string $transport, int $workerId, int $concurrency = 1): Process;
 }

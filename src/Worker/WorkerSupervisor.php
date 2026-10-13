@@ -4,14 +4,13 @@ declare(strict_types=1);
 
 namespace Welcomattic\MessengerCentral\Worker;
 
-use Closure;
+use Symfony\Component\Clock\ClockInterface;
+use Symfony\Component\Clock\NativeClock;
 
 use function array_filter;
 use function array_reverse;
 use function array_values;
 use function count;
-use function microtime;
-use function usleep;
 
 /**
  * Starts, scales and stops the workers of every transport.
@@ -26,40 +25,55 @@ final class WorkerSupervisor
 
     private int $nextId = 1;
 
-    /** @var Closure(): float */
-    private Closure $clock;
-
     /**
-     * @param (Closure(): float)|null $clock
+     * @param float $stopTimeout seconds given to a worker to stop before it is killed
      */
     public function __construct(
         private readonly ProcessFactory $processFactory,
-        ?Closure $clock = null,
-    ) {
-        $this->clock = $clock ?? static fn(): float => microtime(true);
-    }
+        private readonly ClockInterface $clock = new NativeClock(),
+        private readonly float $stopTimeout = 10.0,
+    ) {}
 
     /**
-     * Starts or stops workers until $count of them consume the transport.
+     * Starts or stops workers until $count of them consume the transport,
+     * each one handling up to $concurrency messages at the same time.
      */
-    public function scale(string $transport, int $count): void
+    public function scale(string $transport, int $count, int $concurrency = 1): void
     {
-        $now = ($this->clock)();
+        $now = $this->now();
         $this->workers[$transport] = array_values(array_filter(
             $this->workers[$transport] ?? [],
             static fn(WorkerProcess $worker): bool => $worker->status->isAlive(),
         ));
 
-        $active = $this->active($transport);
-        for ($i = count($active); $i < $count; ++$i) {
+        $kept = [];
+        foreach ($this->active($transport) as $worker) {
+            if ($worker->concurrency === $concurrency) {
+                $kept[] = $worker;
+
+                continue;
+            }
+
+            // The concurrency of a running worker cannot change: it is replaced
+            $worker->stop($now);
+        }
+
+        for ($i = count($kept); $i < $count; ++$i) {
             $id = $this->nextId++;
-            $worker = new WorkerProcess($id, $transport, $this->processFactory->create($transport, $id), $now);
+            $worker = new WorkerProcess(
+                $id,
+                $transport,
+                $this->processFactory->create($transport, $id, $concurrency),
+                $now,
+                $concurrency,
+                $this->stopTimeout,
+            );
             $worker->start();
             $this->workers[$transport][] = $worker;
         }
 
-        foreach (array_reverse($active) as $i => $worker) {
-            if ($i >= (count($active) - $count)) {
+        foreach (array_reverse($kept) as $i => $worker) {
+            if ($i >= (count($kept) - $count)) {
                 break;
             }
 
@@ -73,20 +87,22 @@ final class WorkerSupervisor
     }
 
     /**
-     * Stops every worker, waiting for them at most $timeout seconds.
+     * Stops every worker, waiting for them at most $timeout seconds (the
+     * stop timeout by default) before killing them.
      */
-    public function stopAll(float $timeout = 5.0): void
+    public function stopAll(?float $timeout = null): void
     {
-        $now = ($this->clock)();
+        $timeout ??= $this->stopTimeout;
+        $now = $this->now();
         foreach ($this->workers as $workers) {
             foreach ($workers as $worker) {
                 $worker->stop($now);
             }
         }
 
-        $deadline = microtime(true) + $timeout;
-        while ($this->hasRunning() && microtime(true) < $deadline) {
-            usleep(50_000);
+        $deadline = $now + $timeout;
+        while ($this->hasRunning() && $this->now() < $deadline) {
+            $this->clock->sleep(0.05);
             $this->poll();
         }
 
@@ -106,13 +122,13 @@ final class WorkerSupervisor
      */
     public function poll(): bool
     {
-        $now = ($this->clock)();
+        $now = $this->now();
         $changed = false;
-        foreach ($this->workers as $transport => $workers) {
+        foreach ($this->workers as $workers) {
             foreach ($workers as $worker) {
                 $status = $worker->status;
                 foreach ($worker->poll($now) as $report) {
-                    $this->activity($transport)->record($report, $worker->id, $now);
+                    $this->activity($worker->transport)->record($report, $worker->id, $now);
                     $changed = true;
                 }
 
@@ -161,5 +177,12 @@ final class WorkerSupervisor
         }
 
         return false;
+    }
+
+    private function now(): float
+    {
+        $now = $this->clock->now();
+
+        return $now->getTimestamp() + ($now->getMicrosecond() / 1_000_000);
     }
 }
